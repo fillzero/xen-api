@@ -45,7 +45,6 @@ type feature =
 	| Integrated_GPU
 	| VSS
 	| Xen_motion
-	| Ssl_legacy_switch
 	with rpc
 
 type orientation = Positive | Negative
@@ -80,7 +79,6 @@ let keys_of_features =
 		Integrated_GPU, ("restrict_integrated_gpu_passthrough", Negative, "iGPU");
 		VSS, ("restrict_vss", Negative, "VSS");
 		Xen_motion, ("restrict_xen_motion", Negative, "XenMotion");
-		Ssl_legacy_switch, ("restrict_ssl_legacy_switch", Negative, "Ssl_legacy_switch");
 	]
 
 let string_of_feature f =

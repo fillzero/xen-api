@@ -45,7 +45,6 @@ type feature =
 	| Integrated_GPU               (** Enable use of integrated GPU passthrough *)
 	| VSS                          (** Enable use of VSS *)
 	| Xen_motion                   (** Enable XenMotion feature *)
-	| Ssl_legacy_switch            (** Enable the control switch for SSL/TLS legacy-mode. *)
 
 (** Convert RPC into {!feature}s *)
 val feature_of_rpc : Rpc.t -> feature
