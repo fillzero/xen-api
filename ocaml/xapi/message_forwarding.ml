@@ -1268,7 +1268,24 @@ module Forward = functor(Local: Custom_actions.CUSTOM_ACTIONS) -> struct
 			let local_fn = Local.VM.unpause ~vm in
 			with_vm_operation ~__context ~self:vm ~doc:"VM.unpause" ~op:`unpause
 				(fun () ->
-					forward_vm_op ~local_fn ~__context ~vm (fun session_id rpc -> Client.VM.unpause rpc session_id vm));
+					let value = Xenstore.with_xs (fun xs ->
+						try Some ( xs.Xenstore.Xs.read (Printf.sprintf "/local/domain/%Ld/qemu-pid" (Db.VM.get_domid __context vm)))
+						with Xs_protocol.Enoent _ -> None)
+					in
+					let action = match value with
+					| Some "0" ->
+						if Db.VM.get_actions_after_crash ~__context ~self:vm = `preserve
+						then
+							begin
+								debug "QEMU is crashed, hard shutdown VM '%s'" (Ref.string_of vm);
+								forward_vm_op  ~local_fn:(Local.VM.hard_shutdown ~vm) ~__context ~vm (fun session_id rpc -> Client.VM.hard_shutdown rpc session_id vm)
+							end
+						else
+							raise (Api_errors.Server_error(Api_errors.operation_not_allowed, ["QEMU is crashed, vm in pause state, but actions-after-crash is not set to preserve, this should not happen"]))
+					| _ ->  forward_vm_op ~local_fn ~__context ~vm (fun session_id rpc -> Client.VM.unpause rpc session_id vm);
+					in
+					action
+				);
 			update_vbd_operations ~__context ~vm;
 			update_vif_operations ~__context ~vm
 
