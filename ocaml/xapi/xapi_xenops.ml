@@ -708,6 +708,16 @@ module MD = struct
     (* CA-55754: temporarily disable msitranslate when GPU is passed through. *)
     let pci_msitranslate =
       if vm.API.vM_VGPUs <> [] then false else pci_msitranslate in
+
+    (* CP-18860: check memory limits if using nested_virt *)
+    if Vm_platform.is_true ~key:"nested-virt" ~platformdata ~default:false
+    then
+      begin
+        let module C = Xapi_vm_memory_constraints.Vm_memory_constraints in
+        let c = C.get ~__context ~vm_ref:vmref in
+        C.assert_valid_and_pinned_at_static_max c
+      end;
+
     {
       id = vm.API.vM_uuid;
       name = vm.API.vM_name_label;
@@ -1450,11 +1460,8 @@ let update_vm ~__context id =
               (fun (_, state) ->
                  let gm = Db.VM.get_guest_metrics ~__context ~self in
                  debug "xenopsd event: Updating VM %s PV drivers detected %b" id state.pv_drivers_detected;
-                 try
-                   Db.VM_guest_metrics.set_PV_drivers_detected ~__context ~self:gm ~value:state.pv_drivers_detected;
-                   Db.VM_guest_metrics.set_PV_drivers_up_to_date ~__context ~self:gm ~value:state.pv_drivers_detected
-                 with e ->
-                   error "Caught %s: while updating VM %s PV driver detection" (Printexc.to_string e) id
+                 Db.VM_guest_metrics.set_PV_drivers_detected ~__context ~self:gm ~value:state.pv_drivers_detected;
+                 Db.VM_guest_metrics.set_PV_drivers_up_to_date ~__context ~self:gm ~value:state.pv_drivers_detected
               ) info in
           Opt.iter
             (fun (_, state) ->
