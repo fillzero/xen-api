@@ -38,7 +38,6 @@ let allowed_power_states ~__context ~vmr ~(op:API.vm_operations) =
   (* a VM.import is done on file and not on VMs, so there is not power-state there! *)
   | `import
     -> []
-
   | `changing_VCPUs
   | `changing_static_range
   | `changing_memory_limits       -> `Halted :: (if vmr.Db_actions.vM_is_control_domain then [`Running] else [])
@@ -524,7 +523,10 @@ let force_state_reset_keep_current_operations ~__context ~self ~value:state =
       (fun vif ->
          Db.VIF.set_currently_attached ~__context ~self:vif ~value:false;
          Db.VIF.set_reserved ~__context ~self:vif ~value:false;
-         Xapi_vif_helpers.clear_current_operations ~__context ~self:vif)
+         Xapi_vif_helpers.clear_current_operations ~__context ~self:vif;
+         Opt.iter
+           (fun p -> Pvs_proxy_control.clear_proxy_state ~__context vif p)
+           (Pvs_proxy_control.find_proxy_for_vif ~__context ~vif))
       (Db.VM.get_VIFs ~__context ~self);
     List.iter
       (fun vgpu ->

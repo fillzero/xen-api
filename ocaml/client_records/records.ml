@@ -216,7 +216,7 @@ let message_record rpc session_id message =
         make_field ~name:"uuid"         ~get:(fun () -> (x ()).API.message_uuid) ();
         make_field ~name:"name"         ~get:(fun () -> (x ()).API.message_name) ();
         make_field ~name:"priority"     ~get:(fun () -> Int64.to_string (x ()).API.message_priority) ();
-        make_field ~name:"class"        ~get:(fun () -> match (x ()).API.message_cls with `VM -> "VM" | `Host -> "Host" | `SR -> "SR" | `Pool -> "Pool" | `VMPP -> "VMPP") ();
+        make_field ~name:"class"        ~get:(fun () -> match (x ()).API.message_cls with `VM -> "VM" | `Host -> "Host" | `SR -> "SR" | `Pool -> "Pool" | `VMPP -> "VMPP" | `PVS_proxy -> "PVS_proxy") ();
         make_field ~name:"obj-uuid"     ~get:(fun () -> (x ()).API.message_obj_uuid) ();
         make_field ~name:"timestamp"    ~get:(fun () -> Date.to_string (x ()).API.message_timestamp) ();
         make_field ~name:"body"         ~get:(fun () -> (x ()).API.message_body) ();
@@ -1704,3 +1704,144 @@ let vgpu_type_record rpc session_id vgpu_type =
         ~get:(fun () -> string_of_bool (x ()).API.vGPU_type_experimental) ();
     ]
   }
+
+let pvs_site_record rpc session_id pvs_site =
+  let _ref = ref pvs_site in
+  let empty_record =
+    ToGet (fun () -> Client.PVS_site.get_record rpc session_id !_ref) in
+  let record = ref empty_record in
+  let x () = lzy_get record in
+  { setref    = (fun r -> _ref := r ; record := empty_record)
+  ; setrefrec = (fun (a,b) -> _ref := a; record := Got b)
+  ; record    = x
+  ; getref    = (fun () -> !_ref)
+  ; fields=
+      [ make_field ~name:"uuid"
+          ~get:(fun () -> (x ()).API.pVS_site_uuid) ()
+      ; make_field ~name:"name-label"
+          ~get:(fun () -> (x ()).API.pVS_site_name_label)
+          ~set:(fun x ->
+              Client.PVS_site.set_name_label rpc session_id !_ref x) ()
+      ; make_field ~name:"name-description"
+          ~get:(fun () -> (x ()).API.pVS_site_name_description)
+          ~set:(fun x ->
+              Client.PVS_site.set_name_description rpc session_id !_ref x) ()
+      ; make_field ~name:"pvs-uuid"
+          ~get:(fun () -> (x ()).API.pVS_site_PVS_uuid)
+          ~set:(fun x ->
+              Client.PVS_site.set_PVS_uuid rpc session_id !_ref x)
+          ()
+      ; make_field ~name:"pvs-cache-storage-uuids"
+          ~get:(fun () -> (x ()).API.pVS_site_cache_storage
+                          |> List.map get_uuid_from_ref |> String.concat "; ")
+          ~get_set:(fun () ->
+              List.map get_uuid_from_ref (x ()).API.pVS_site_cache_storage)
+          ()
+      ; make_field ~name:"pvs-server-uuids"
+          ~get:(fun () -> (x ()).API.pVS_site_servers
+                          |> List.map get_uuid_from_ref |> String.concat "; ")
+          ~get_set:(fun () -> (x ()).API.pVS_site_servers
+                              |> List.map get_uuid_from_ref)
+          ()
+      ; make_field ~name:"pvs-proxy-uuids"
+          ~get:(fun () -> (x ()).API.pVS_site_proxies
+                          |> List.map get_uuid_from_ref |> String.concat "; ")
+          ~get_set:(fun () -> (x ()).API.pVS_site_proxies
+                              |> List.map get_uuid_from_ref)
+          ()
+      ]
+  }
+
+let pvs_server_record rpc session_id pvs_site =
+  let _ref = ref pvs_site in
+  let empty_record =
+    ToGet (fun () -> Client.PVS_server.get_record rpc session_id !_ref) in
+  let record = ref empty_record in
+  let x () = lzy_get record in
+  { setref    = (fun r -> _ref := r ; record := empty_record)
+  ; setrefrec = (fun (a,b) -> _ref := a; record := Got b)
+  ; record    = x
+  ; getref    = (fun () -> !_ref)
+  ; fields=
+      [ make_field ~name:"uuid"
+          ~get:(fun () -> (x ()).API.pVS_server_uuid)
+          ()
+      ; make_field ~name:"addresses"
+          ~get:(fun () -> String.concat "; " (x ()).API.pVS_server_addresses)
+          ~get_set:(fun () -> (x ()).API.pVS_server_addresses)
+          ()
+      ; make_field ~name:"first-port"
+          ~get:(fun () -> (x ()).API.pVS_server_first_port |> Int64.to_string)
+          ()
+      ; make_field ~name:"last-port"
+          ~get:(fun () -> (x ()).API.pVS_server_last_port |> Int64.to_string)
+          ()
+      ; make_field ~name:"pvs-site-uuid"
+          ~get:(fun () -> (x ()).API.pVS_server_site |> get_uuid_from_ref)
+          ()
+      ]
+  }
+
+let pvs_proxy_record rpc session_id pvs_site =
+  let _ref = ref pvs_site in
+  let empty_record =
+    ToGet (fun () -> Client.PVS_proxy.get_record rpc session_id !_ref) in
+  let record = ref empty_record in
+  let x () = lzy_get record in
+  { setref    = (fun r -> _ref := r ; record := empty_record)
+  ; setrefrec = (fun (a,b) -> _ref := a; record := Got b)
+  ; record    = x
+  ; getref    = (fun () -> !_ref)
+  ; fields=
+      [ make_field ~name:"uuid"
+          ~get:(fun () -> (x ()).API.pVS_proxy_uuid)
+          ()
+      ; make_field ~name:"pvs-site-uuid"
+          ~get:(fun () -> (x ()).API.pVS_proxy_site |> get_uuid_from_ref)
+          ()
+      ; make_field ~name:"vif-uuid"
+          ~get:(fun () -> (x ()).API.pVS_proxy_VIF |> get_uuid_from_ref)
+          ()
+      ; make_field ~name:"currently-attached"
+          ~get:(fun () -> (x ()).API.pVS_proxy_currently_attached
+                          |> string_of_bool)
+          ()
+      ; make_field ~name:"status"
+          ~get:(fun () -> (x ()).API.pVS_proxy_status
+                          |> Record_util.pvs_proxy_status_to_string)
+          ()
+      ]
+  }
+
+let pvs_cache_storage_record rpc session_id pvs_site =
+  let _ref = ref pvs_site in
+  let empty_record =
+    ToGet (fun () -> Client.PVS_cache_storage.get_record rpc session_id !_ref) in
+  let record = ref empty_record in
+  let x () = lzy_get record in
+  { setref    = (fun r -> _ref := r ; record := empty_record)
+  ; setrefrec = (fun (a,b) -> _ref := a; record := Got b)
+  ; record    = x
+  ; getref    = (fun () -> !_ref)
+  ; fields=
+      [ make_field ~name:"uuid"
+          ~get:(fun () -> (x ()).API.pVS_cache_storage_uuid)
+          ()
+      ; make_field ~name:"host-uuid"
+          ~get:(fun () -> (x ()).API.pVS_cache_storage_host |> get_uuid_from_ref)
+          ()
+      ; make_field ~name:"sr-uuid"
+          ~get:(fun () -> (x ()).API.pVS_cache_storage_SR |> get_uuid_from_ref)
+          ()
+      ; make_field ~name:"pvs-site-uuid"
+          ~get:(fun () -> (x ()).API.pVS_cache_storage_site |> get_uuid_from_ref)
+          ()
+      ; make_field ~name:"size"
+          ~get:(fun () -> (x ()).API.pVS_cache_storage_size |> Int64.to_string)
+          ()
+      ; make_field ~name:"vdi-uuid"
+          ~get:(fun () -> (x ()).API.pVS_cache_storage_VDI |> get_uuid_from_ref)
+          ()
+      ]
+  }
+

@@ -94,18 +94,19 @@ let attach_internal ?(management_interface=false) ~__context ~self () =
      	   we might be just about to loose our current management interface... *)
   List.iter (fun pif ->
       let uuid = Db.PIF.get_uuid ~__context ~self:pif in
-      if Db.PIF.get_managed ~__context ~self:pif then
+      if Db.PIF.get_managed ~__context ~self:pif then begin
         if Db.PIF.get_currently_attached ~__context ~self:pif = false || management_interface then begin
           Xapi_network_attach_helpers.assert_no_slave ~__context pif;
           debug "Trying to attach PIF: %s" uuid;
           Nm.bring_pif_up ~__context ~management_interface pif
-        end else
-        if management_interface then
-          info "PIF %s is the management interface, but it is not managed by xapi. \
-                					The bridge and IP must be configured through other means." uuid
-        else
-          info "PIF %s is needed by a VM, but not managed by xapi. \
-                					The bridge must be configured through other means." uuid
+        end
+      end else
+      if management_interface then
+        info "PIF %s is the management interface, but it is not managed by xapi. \
+              					The bridge and IP must be configured through other means." uuid
+      else
+        info "PIF %s is needed by a VM, but not managed by xapi. \
+              					The bridge must be configured through other means." uuid
     ) local_pifs
 
 let detach ~__context bridge_name =
@@ -237,7 +238,8 @@ let attach_for_vif ~__context ~vif () =
   register_vif ~__context vif;
   let network = Db.VIF.get_network ~__context ~self:vif in
   attach_internal ~__context ~self:network ();
-  Xapi_udhcpd.maybe_add_lease ~__context vif
+  Xapi_udhcpd.maybe_add_lease ~__context vif;
+  Pvs_proxy_control.maybe_start_proxy_for_vif ~__context ~vif
 
 let attach_for_vm ~__context ~host ~vm =
   List.iter
@@ -245,11 +247,15 @@ let attach_for_vm ~__context ~host ~vm =
        attach_for_vif ~__context ~vif ()
     ) (Db.VM.get_VIFs ~__context ~self:vm)
 
+let detach_for_vif ~__context ~vif =
+  deregister_vif ~__context vif;
+  Pvs_proxy_control.maybe_stop_proxy_for_vif ~__context ~vif
+
 let detach_for_vm ~__context ~host ~vm =
   try
     List.iter
       (fun vif ->
-         deregister_vif ~__context vif
+         detach_for_vif ~__context ~vif
       ) (Db.VM.get_VIFs ~__context ~self:vm)
   with e ->
     error "Caught %s while detaching networks" (string_of_exn e)

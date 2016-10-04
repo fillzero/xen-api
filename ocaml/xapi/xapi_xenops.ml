@@ -379,7 +379,24 @@ module MD = struct
       persistent = (try Db.VDI.get_on_boot ~__context ~self:vbd.API.vBD_VDI = `persist with _ -> true);
     }
 
-  let of_vif ~__context ~vm ~vif =
+  let of_pvs_proxy ~__context vif proxy =
+    let site = Db.PVS_proxy.get_site ~__context ~self:proxy in
+    let site_uuid = Db.PVS_site.get_uuid ~__context ~self:site in
+    let servers = Db.PVS_site.get_servers ~__context ~self:site in
+    let servers =
+      List.map (fun server ->
+          let rc = Db.PVS_server.get_record ~__context ~self:server in
+          {
+            Vif.PVS_proxy.addresses = rc.API.pVS_server_addresses;
+            first_port = Int64.to_int rc.API.pVS_server_first_port;
+            last_port = Int64.to_int rc.API.pVS_server_last_port;
+          }
+        ) servers
+    in
+    let interface = Pvs_proxy_control.proxy_port_name vif in
+    site_uuid, servers, interface
+
+  let of_vif ~__context ~vm ~vif:(vif_ref, vif) =
     let net = Db.Network.get_record ~__context ~self:vif.API.vIF_network in
     let net_mtu = Int64.to_int (net.API.network_MTU) in
     let mtu =
@@ -449,6 +466,17 @@ module MD = struct
         let gateway = if vif.API.vIF_ipv6_gateway = "" then None else Some vif.API.vIF_ipv6_gateway in
         Vif.Static6 (vif.API.vIF_ipv6_addresses, gateway)
     in
+    let extra_private_keys =
+      [
+        "vif-uuid", vif.API.vIF_uuid;
+        "network-uuid", net.API.network_uuid;
+      ]
+    in
+    let pvs_proxy =
+      Opt.map
+        (of_pvs_proxy ~__context vif)
+        (Pvs_proxy_control.find_proxy_for_vif ~__context ~vif:vif_ref)
+    in
     let open Vif in {
       id = (vm.API.vM_uuid, vif.API.vIF_device);
       position = int_of_string vif.API.vIF_device;
@@ -459,12 +487,10 @@ module MD = struct
       backend = backend_of_network net;
       other_config = vif.API.vIF_other_config;
       locking_mode = locking_mode;
-      extra_private_keys = [
-        "vif-uuid", vif.API.vIF_uuid;
-        "network-uuid", net.API.network_uuid;
-      ];
+      extra_private_keys;
       ipv4_configuration = ipv4_configuration;
-      ipv6_configuration = ipv6_configuration
+      ipv6_configuration = ipv6_configuration;
+      pvs_proxy;
     }
 
   let pcis_of_vm ~__context (vmref, vm) =
@@ -840,8 +866,8 @@ let create_metadata ~__context ~upgrade ~self =
   let vbds = List.filter (fun vbd -> vbd.API.vBD_currently_attached)
       (List.map (fun self -> Db.VBD.get_record ~__context ~self) vm.API.vM_VBDs) in
   let vbds' = List.map (fun vbd -> MD.of_vbd ~__context ~vm ~vbd) vbds in
-  let vifs = List.filter (fun vif -> vif.API.vIF_currently_attached)
-      (List.map (fun self -> Db.VIF.get_record ~__context ~self) vm.API.vM_VIFs) in
+  let vifs = List.filter (fun (_, vif) -> vif.API.vIF_currently_attached)
+      (List.map (fun self -> self, Db.VIF.get_record ~__context ~self) vm.API.vM_VIFs) in
   let vifs' = List.map (fun vif -> MD.of_vif ~__context ~vm ~vif) vifs in
   let pcis = MD.pcis_of_vm ~__context (self, vm) in
   let vgpus = MD.vgpus_of_vm ~__context (self, vm) in
@@ -1667,6 +1693,15 @@ let update_vif ~__context id =
                        Monitor_dbcalls_cache.clear_cache_for_pif ~pif_name
                      ) pifs
                end;
+               (match Pvs_proxy_control.find_proxy_for_vif ~__context ~vif with
+                | None -> ()
+                | Some proxy ->
+                  debug "xenopsd event: Updating PVS_proxy for VIF %s.%s currently_attached <- %b" (fst id) (snd id) state.pvs_rules_active;
+                  if state.pvs_rules_active then
+                    Db.PVS_proxy.set_currently_attached ~__context ~self:proxy ~value:true
+                  else
+                    Pvs_proxy_control.clear_proxy_state ~__context vif proxy
+               );
                debug "xenopsd event: Updating VIF %s.%s currently_attached <- %b" (fst id) (snd id) (state.plugged || state.active);
                Db.VIF.set_currently_attached ~__context ~self:vif ~value:(state.plugged || state.active)
             ) info;
@@ -2711,7 +2746,7 @@ let vbd_insert ~__context ~self ~vdi =
 
 let md_of_vif ~__context ~self =
   let vm = Db.VIF.get_VM ~__context ~self in
-  MD.of_vif ~__context ~vm:(Db.VM.get_record ~__context ~self:vm) ~vif:(Db.VIF.get_record ~__context ~self)
+  MD.of_vif ~__context ~vm:(Db.VM.get_record ~__context ~self:vm) ~vif:(self, Db.VIF.get_record ~__context ~self)
 
 let vif_plug ~__context ~self =
   let vm = Db.VIF.get_VM ~__context ~self in
@@ -2748,6 +2783,21 @@ let vif_set_locking_mode ~__context ~self =
        let dbg = Context.string_of_task __context in
        let module Client = (val make_client queue_name : XENOPS) in
        Client.VIF.set_locking_mode dbg vif.Vif.id vif.Vif.locking_mode |> sync_with_task __context queue_name;
+       Events_from_xenopsd.wait queue_name dbg (fst vif.Vif.id) ();
+    )
+
+let vif_set_pvs_proxy ~__context ~self creating =
+  let vm = Db.VIF.get_VM ~__context ~self in
+  let queue_name = queue_of_vm ~__context ~self:vm in
+  transform_xenops_exn ~__context ~vm queue_name
+    (fun () ->
+       assert_resident_on ~__context ~self:vm;
+       let vif = md_of_vif ~__context ~self in
+       let proxy = if creating then vif.Vif.pvs_proxy else None in
+       info "xenops: VIF.set_pvs_proxy %s.%s" (fst vif.Vif.id) (snd vif.Vif.id);
+       let dbg = Context.string_of_task __context in
+       let module Client = (val make_client queue_name : XENOPS) in
+       Client.VIF.set_pvs_proxy dbg vif.Vif.id proxy |> sync_with_task __context queue_name;
        Events_from_xenopsd.wait queue_name dbg (fst vif.Vif.id) ();
     )
 

@@ -37,7 +37,7 @@ let assert_raises_api_error (code : string) ?(args : string list option) (f : un
     | Some args ->
       assert_equal ~printer:Test_printers.(list string) ~msg:"Function raised API error with unexpected args" args a
 
-let make_localhost ~__context =
+let make_localhost ~__context ?(features=Features.all_features) () =
   let host_info = {
     Create_misc.name_label = "test host";
     xen_verstring = "unknown";
@@ -61,13 +61,19 @@ let make_localhost ~__context =
      	   simple thing first and just set localhost_ref instead. *)
   (* Dbsync_slave.refresh_localhost_info ~__context host_info; *)
   Xapi_globs.localhost_ref := Helpers.get_localhost ~__context;
+  Db.Host.add_to_software_version ~__context ~self:!Xapi_globs.localhost_ref ~key:"network_backend"
+    ~value:(Network_interface.(string_of_kind Openvswitch));
   Create_misc.ensure_domain_zero_records ~__context ~host:!Xapi_globs.localhost_ref host_info;
-  Dbsync_master.create_pool_record ~__context
+  Dbsync_master.create_pool_record ~__context;
+  let pool = Helpers.get_pool ~__context in
+  Db.Pool.set_restrictions ~__context
+    ~self:pool
+    ~value:(Features.to_assoc_list features)
 
 (** Make a simple in-memory database containing a single host and dom0 VM record. *)
-let make_test_database ?(conn=Mock.Database.conn) ?(reuse=false) () =
+let make_test_database ?(conn=Mock.Database.conn) ?(reuse=false) ?features () =
   let __context = Mock.make_context_with_new_db ~conn ~reuse "mock" in
-  make_localhost ~__context;
+  make_localhost ~__context ?features ();
   __context
 
 let make_vm ~__context ?(name_label="name_label") ?(name_description="description")
@@ -76,7 +82,7 @@ let make_vm ~__context ?(name_label="name_label") ?(name_description="descriptio
     ?(memory_dynamic_min=500L) ?(memory_static_min=0L) ?(vCPUs_params=[])
     ?(vCPUs_max=1L) ?(vCPUs_at_startup=1L) ?(actions_after_shutdown=`destroy)
     ?(actions_after_reboot=`restart) ?(actions_after_crash=`destroy)
-    ?(pV_bootloader="") ?(pV_kernel="") ?(pV_ramdisk="") ?(pV_args="")
+    ?(pV_bootloader="") ?(pV_kernel="") ?(pV_ramdisk="") ?(pV_args="") 
     ?(pV_bootloader_args="") ?(pV_legacy_args="") ?(hVM_boot_policy="BIOS order")
     ?(hVM_boot_params=[]) ?(hVM_shadow_multiplier=1.) ?(platform=[]) ?(pCI_bus="")
     ?(other_config=[]) ?(xenstore_data=[]) ?(recommendations="") ?(ha_always_run=false)
@@ -88,8 +94,8 @@ let make_vm ~__context ?(name_label="name_label") ?(name_description="descriptio
   Xapi_vm.create ~__context ~name_label ~name_description ~user_version ~is_a_template
     ~affinity ~memory_target ~memory_static_max ~memory_dynamic_max ~memory_dynamic_min
     ~memory_static_min ~vCPUs_params ~vCPUs_max ~vCPUs_at_startup ~actions_after_shutdown
-    ~actions_after_reboot ~actions_after_crash ~pV_bootloader ~pV_kernel ~pV_ramdisk
-    ~pV_args ~pV_bootloader_args ~pV_legacy_args ~hVM_boot_policy ~hVM_boot_params
+    ~actions_after_reboot ~actions_after_crash ~pV_bootloader ~pV_kernel ~pV_ramdisk 
+    ~pV_args ~pV_bootloader_args ~pV_legacy_args ~hVM_boot_policy ~hVM_boot_params 
     ~hVM_shadow_multiplier ~platform ~pCI_bus ~other_config ~xenstore_data ~recommendations
     ~ha_always_run ~ha_restart_priority ~tags ~blocked_operations ~protection_policy
     ~is_snapshot_from_vmpp ~appliance ~start_delay ~shutdown_delay ~order ~suspend_SR
@@ -99,13 +105,53 @@ let make_host ~__context ?(uuid=make_uuid ()) ?(name_label="host")
     ?(name_description="description") ?(hostname="localhost") ?(address="127.0.0.1")
     ?(external_auth_type="") ?(external_auth_service_name="") ?(external_auth_configuration=[])
     ?(license_params=[]) ?(edition="free") ?(license_server=[]) ?(local_cache_sr=Ref.null) ?(chipset_info=[]) ?(ssl_legacy=false) () =
-
   Xapi_host.create ~__context ~uuid ~name_label ~name_description ~hostname ~address ~external_auth_type ~external_auth_service_name ~external_auth_configuration ~license_params ~edition ~license_server ~local_cache_sr ~chipset_info ~ssl_legacy
+
+let make_host2 ~__context ?(ref=Ref.make ()) ?(uuid=make_uuid ()) ?(name_label="host")
+    ?(name_description="description") ?(hostname="localhost") ?(address="127.0.0.1")
+    ?(external_auth_type="") ?(external_auth_service_name="") ?(external_auth_configuration=[])
+    ?(license_params=[]) ?(edition="free") ?(license_server=[]) ?(local_cache_sr=Ref.null)
+    ?(chipset_info=[]) ?(ssl_legacy=false) () =
+  Db.Host.create ~__context ~ref
+    ~current_operations:[] ~allowed_operations:[]
+    ~software_version:(Xapi_globs.software_version ())
+    ~enabled:false
+    ~aPI_version_major:Xapi_globs.api_version_major
+    ~aPI_version_minor:Xapi_globs.api_version_minor
+    ~aPI_version_vendor:Xapi_globs.api_version_vendor
+    ~aPI_version_vendor_implementation:Xapi_globs.api_version_vendor_implementation
+    ~name_description ~name_label ~uuid ~other_config:[]
+    ~capabilities:[]
+    ~cpu_configuration:[]
+    ~cpu_info:[]
+    ~chipset_info
+    ~memory_overhead:0L
+    ~sched_policy:"credit"
+    ~supported_bootloaders:[]
+    ~suspend_image_sr:Ref.null ~crash_dump_sr:Ref.null
+    ~logging:[] ~hostname ~address ~metrics:Ref.null
+    ~license_params ~boot_free_mem:0L
+    ~ha_statefiles:[] ~ha_network_peers:[] ~blobs:[] ~tags:[]
+    ~external_auth_type
+    ~external_auth_service_name
+    ~external_auth_configuration
+    ~edition ~license_server
+    ~bios_strings:[]
+    ~power_on_mode:""
+    ~power_on_config:[]
+    ~local_cache_sr
+    ~ssl_legacy
+    ~guest_VCPUs_params:[]
+    ~display:`enabled
+    ~virtual_hardware_platform_versions:[]
+    ~control_domain:Ref.null
+    ~patches_requiring_reboot:[];
+  ref
 
 let make_pif ~__context ~network ~host ?(device="eth0") ?(mAC="C0:FF:EE:C0:FF:EE") ?(mTU=1500L)
     ?(vLAN=(-1L)) ?(physical=true) ?(ip_configuration_mode=`None) ?(iP="") ?(netmask="")
-    ?(gateway="") ?(dNS="") ?(bond_slave_of=Ref.null) ?(vLAN_master_of=Ref.null)
-    ?(management=false) ?(other_config=[]) ?(disallow_unplug=false)
+    ?(gateway="") ?(dNS="") ?(bond_slave_of=Ref.null) ?(vLAN_master_of=Ref.null) 
+    ?(management=false) ?(other_config=[]) ?(disallow_unplug=false) 
     ?(ipv6_configuration_mode=`None) ?(iPv6=[""]) ?(ipv6_gateway="") ?(primary_address_type=`IPv4) ?(managed=true)
     ?(properties=["gro", "on"]) () =
   Xapi_pif.pool_introduce ~__context
@@ -114,7 +160,7 @@ let make_pif ~__context ~network ~host ?(device="eth0") ?(mAC="C0:FF:EE:C0:FF:EE
     ~ipv6_configuration_mode ~iPv6 ~ipv6_gateway ~primary_address_type ~managed ~properties
 
 let make_network ~__context ?(name_label="net") ?(name_description="description") ?(mTU=1500L)
-    ?(other_config=[]) ?(bridge="xenbr0") () =
+    ?(other_config=[]) ?(bridge="xenbr0") () = 
   Xapi_network.pool_introduce ~__context ~name_label ~name_description ~mTU ~other_config ~bridge
 
 let make_vif ~__context ?(ref=Ref.make ()) ?(uuid=make_uuid ())
@@ -124,8 +170,8 @@ let make_vif ~__context ?(ref=Ref.make ()) ?(uuid=make_uuid ())
     ?(qos_algorithm_params=[]) ?(qos_supported_algorithms=[])
     ?(currently_attached=false) ?(status_code=0L) ?(status_detail="")
     ?(runtime_properties=[]) ?(other_config=[]) ?(metrics=Ref.null)
-    ?(locking_mode=`unlocked) ?(ipv4_allowed=[]) ?(ipv6_allowed=[])
-    ?(ipv4_configuration_mode=`None) ?(ipv4_addresses=[]) ?(ipv4_gateway="")
+    ?(locking_mode=`unlocked) ?(ipv4_allowed=[]) ?(ipv6_allowed=[]) 
+    ?(ipv4_configuration_mode=`None) ?(ipv4_addresses=[]) ?(ipv4_gateway="") 
     ?(ipv6_configuration_mode=`None) ?(ipv6_addresses=[]) ?(ipv6_gateway="") () =
   Db.VIF.create ~__context ~ref ~uuid ~current_operations ~allowed_operations
     ~reserved ~device ~network ~vM ~mAC ~mAC_autogenerated ~mTU
@@ -277,4 +323,29 @@ let make_vgpu_type ~__context ?(ref=Ref.make ()) ?(uuid=make_uuid ())
   Db.VGPU_type.create ~__context ~ref ~uuid ~vendor_name ~model_name
     ~framebuffer_size ~max_heads ~max_resolution_x ~max_resolution_y ~size
     ~internal_config ~implementation ~identifier ~experimental;
+  ref
+
+let make_pvs_site ~__context ?(ref=Ref.make ()) ?(uuid=make_uuid ())
+    ?(name_label="") ?(name_description="") ?(pVS_uuid="") ?(cache_storage=[]) () =
+  Db.PVS_site.create ~__context ~ref ~uuid ~name_label ~name_description
+    ~pVS_uuid ~cache_storage;
+  ref
+
+let make_pvs_proxy ~__context ?(ref=Ref.make ()) ?(uuid=make_uuid ())
+    ?(site=Ref.null) ?(vIF=Ref.null)
+    ?(currently_attached=false) ?(status=`stopped) () =
+  Db.PVS_proxy.create ~__context
+    ~ref ~uuid ~site ~vIF ~currently_attached ~status;
+  ref
+
+let make_pvs_server ~__context ?(ref=Ref.make ()) ?(uuid=make_uuid ())
+    ?(addresses=[]) ?(first_port=1L) ?(last_port=65535L) ?(site=Ref.null) () =
+  Db.PVS_server.create ~__context
+    ~addresses ~ref ~uuid ~first_port ~last_port ~site;
+  ref
+
+let make_pvs_cache_storage ~__context ?(ref=Ref.make ()) ?(uuid=make_uuid ())
+    ?(host=Ref.null) ?(sR=Ref.null) ?(site=Ref.null) ?(size=0L) ?(vDI=Ref.null) () =
+  Db.PVS_cache_storage.create ~__context
+    ~ref ~uuid ~host ~sR ~site ~size ~vDI;
   ref

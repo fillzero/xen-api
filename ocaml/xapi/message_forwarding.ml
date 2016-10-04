@@ -1338,7 +1338,7 @@ module Forward = functor(Local: Custom_actions.CUSTOM_ACTIONS) -> struct
           (Db.VM.get_name_label ~__context ~self:vm)
       in
       let (name, priority) = Api_messages.vm_shutdown in
-      (try ignore(Xapi_message.create ~__context ~name
+      (try ignore(Xapi_message.create ~__context ~name 
                     ~priority ~cls:`VM ~obj_uuid:uuid ~body:message_body) with _ -> ())
 
     let clean_reboot ~__context ~vm =
@@ -2985,7 +2985,7 @@ module Forward = functor(Local: Custom_actions.CUSTOM_ACTIONS) -> struct
             Client.PIF.reconfigure_ipv6 rpc session_id self mode iPv6 gateway dNS) in
       tolerate_connection_loss fn success !Xapi_globs.pif_reconfigure_ip_timeout
 
-    let set_primary_address_type ~__context ~self ~primary_address_type =
+    let set_primary_address_type ~__context ~self ~primary_address_type = 
       info "PIF.set_primary_address_type: PIF = '%s'; primary_address_type = '%s'"
         (pif_uuid ~__context self)
         (Record_util.primary_address_type_to_string primary_address_type);
@@ -3897,5 +3897,64 @@ module Forward = functor(Local: Custom_actions.CUSTOM_ACTIONS) -> struct
 
   module VGPU_type = struct end
   module LVHD = struct end
-end
 
+  module PVS_site = struct
+    let introduce ~__context ~name_label ~name_description ~pVS_uuid =
+      info "PVS_site.introduce %s" name_label;
+      Local.PVS_site.introduce ~__context ~name_label ~name_description ~pVS_uuid
+
+    let forget ~__context ~self =
+      info "PVS_site.forget";
+      Local.PVS_site.forget ~__context ~self
+
+    let set_PVS_uuid ~__context ~self ~value =
+      info "PVS_site.set_PVS_uuid %s" value;
+      Local.PVS_site.set_PVS_uuid ~__context ~self ~value
+  end
+
+  module PVS_server = struct
+    let introduce ~__context ~addresses ~first_port ~last_port ~site =
+      info "PVS_server.introduce";
+      Local.PVS_server.introduce ~__context
+        ~addresses ~first_port ~last_port ~site
+
+    let forget ~__context ~self =
+      info "PVS_server.forget";
+      Local.PVS_server.forget ~__context ~self
+  end
+
+  module PVS_proxy = struct
+    let choose_host ~__context ~vIF =
+      let vm = Db.VIF.get_VM ~__context ~self:vIF in
+      let host = Db.VM.get_resident_on ~__context ~self:vm in
+      if Db.is_valid_ref __context host then host else Helpers.get_localhost ~__context
+
+    let create ~__context ~site ~vIF =
+      info "PVS_proxy.create";
+      let host = choose_host ~__context ~vIF in
+      let local_fn = Local.PVS_proxy.create ~site ~vIF in
+      do_op_on ~__context ~local_fn ~host
+        (fun session_id rpc -> Client.PVS_proxy.create rpc session_id site vIF)
+
+    let destroy ~__context ~self =
+      info "PVS_proxy.destroy";
+      let vIF = Db.PVS_proxy.get_VIF ~__context ~self in
+      let host = choose_host ~__context ~vIF in
+      let local_fn = Local.PVS_proxy.destroy ~self in
+      do_op_on ~__context ~local_fn ~host
+        (fun session_id rpc -> Client.PVS_proxy.destroy rpc session_id self)
+  end
+
+  module PVS_cache_storage = struct
+    let create ~__context ~host ~sR ~site ~size =
+      info "PVS_cache_storage.create";
+      Local.PVS_cache_storage.create ~__context ~host ~sR ~site ~size
+
+    let destroy ~__context ~self =
+      info "PVS_cache_storage.destroy";
+      let local_fn = Local.PVS_cache_storage.destroy ~self in
+      let host = Db.PVS_cache_storage.get_host ~__context ~self in
+      do_op_on ~__context ~local_fn ~host
+        (fun session_id rpc -> Client.PVS_cache_storage.destroy rpc session_id self)
+  end
+end

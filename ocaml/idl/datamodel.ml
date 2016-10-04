@@ -18,7 +18,7 @@ open Datamodel_types
 (* IMPORTANT: Please bump schema vsn if you change/add/remove a _field_.
               You do not have to bump vsn if you change/add/remove a message *)
 let schema_major_vsn = 5
-let schema_minor_vsn = 101
+let schema_minor_vsn = 106
 
 (* Historical schema versions just in case this is useful later *)
 let rio_schema_major_vsn = 5
@@ -150,6 +150,11 @@ let _pgpu = "PGPU"
 let _gpu_group = "GPU_group"
 let _vgpu = "VGPU"
 let _vgpu_type = "VGPU_type"
+let _pvs_site = "PVS_site"
+let _pvs_server = "PVS_server"
+let _pvs_proxy = "PVS_proxy"
+let _pvs_cache_storage = "PVS_cache_storage"
+
 
 (** All the various static role names *)
 
@@ -1349,7 +1354,31 @@ let _ =
     ~doc:"There is a minimal interval required between consecutive plugin calls made on the same VM, please wait before retry." ();
 
   error Api_errors.vm_is_immobile ["VM"]
-    ~doc:"The VM is configured in a way that prevents it from being mobile." ()
+    ~doc:"The VM is configured in a way that prevents it from being mobile." ();
+
+  (* PVS errors *)
+  error Api_errors.pvs_site_contains_running_proxies ["proxies"]
+    ~doc:"The PVS site contains running proxies." ();
+
+  error Api_errors.pvs_site_contains_servers ["servers"]
+    ~doc:"The PVS site contains servers and cannot be forgotten."
+    ();
+
+  error Api_errors.pvs_cache_storage_already_present ["site"; "host"]
+    ~doc:"The PVS site already has cache storage configured for the host."
+    ();
+
+  error Api_errors.pvs_cache_storage_is_in_use ["PVS_cache_storage"]
+    ~doc:"The PVS cache storage is in use by the site and cannot be removed."
+    ();
+
+  error Api_errors.pvs_proxy_already_present ["proxies"]
+    ~doc:"The VIF is already associated with a PVS proxy"
+    ();
+
+  error Api_errors.pvs_server_address_in_use ["address"]
+    ~doc:"The address specified is already in use by an existing PVS_server object"
+    ()
 
 let _ =
   message (fst Api_messages.ha_pool_overcommitted) ~doc:"Pool has become overcommitted: it can no longer guarantee to restart protected VMs if the configured number of hosts fail." ();
@@ -5833,6 +5862,7 @@ let vdi_type = Enum ("vdi_type", [ "system",    "a disk that may be replaced on 
                                    "metadata", "a disk used for HA Pool metadata";
                                    "redo_log", "a disk used for a general metadata redo-log";
                                    "rrd", "a disk that stores SR-level RRDs";
+                                   "pvs_cache", "a disk that stores PVS cache data";
                                  ])
 
 let vdi_introduce_params first_rel =
@@ -8191,6 +8221,7 @@ let message =
                    "SR", "SR";
                    "Pool","Pool";
                    "VMPP","VMPP";
+                   "PVS_proxy","PVS_proxy";
                  ])
   in
   let create = call
@@ -8761,6 +8792,282 @@ let vgpu_type =
     ]
     ()
 
+module PVS_site = struct
+  let lifecycle = [Prototyped, rel_dundee_plus, ""]
+
+  let introduce = call
+      ~name:"introduce"
+      ~doc:"Introduce new PVS site"
+      ~result:(Ref _pvs_site, "the new PVS site")
+      ~params:
+        [ String, "name_label", "name of the PVS site"
+        ; String, "name_description", "description of the PVS site"
+        ; String, "PVS_uuid", "unique identifier of the PVS site"
+        ]
+      ~lifecycle
+      ~allowed_roles:_R_POOL_OP
+      ()
+
+  let forget = call
+      ~name:"forget"
+      ~doc:"Remove a site's meta data"
+      ~params:
+        [ Ref _pvs_site, "self", "this PVS site"
+        ]
+      ~errs:[
+        Api_errors.pvs_site_contains_running_proxies;
+        Api_errors.pvs_site_contains_servers;
+      ]
+      ~lifecycle
+      ~allowed_roles:_R_POOL_OP
+      ()
+
+  let set_PVS_uuid = call
+      ~name:"set_PVS_uuid"
+      ~doc:"Update the PVS UUID of the PVS site"
+      ~params:
+        [ Ref _pvs_site, "self", "this PVS site"
+        ; String, "value", "PVS UUID to be used"
+        ]
+      ~lifecycle
+      ~allowed_roles:_R_POOL_OP
+      ()
+
+  let obj =
+    let null_str = Some (VString "") in
+    let null_set = Some (VSet []) in
+    create_obj
+      ~name: _pvs_site
+      ~descr:"machines serving blocks of data for provisioning VMs"
+      ~doccomments:[]
+      ~gen_constructor_destructor:false
+      ~gen_events:true
+      ~in_db:true
+      ~lifecycle
+      ~persist:PersistEverything
+      ~in_oss_since:None
+      ~messages_default_allowed_roles:_R_POOL_OP
+      ~contents:
+        [ uid     _pvs_site ~lifecycle
+
+        ; namespace ~name:"name" ~contents:(names None RW ~lifecycle) ()
+
+        ; field   ~qualifier:StaticRO ~lifecycle
+            ~ty:String "PVS_uuid" ~default_value:null_str
+            "Unique identifier of the PVS site, as configured in PVS"
+
+        ; field   ~qualifier:DynamicRO ~lifecycle
+            ~ty:(Set (Ref _pvs_cache_storage)) "cache_storage" ~default_value:null_set
+            ~ignore_foreign_key:true
+            "The SR used by PVS proxy for the cache"
+
+        ; field   ~qualifier:DynamicRO ~lifecycle
+            ~ty:(Set (Ref _pvs_server)) "servers"
+            "The set of PVS servers in the site"
+
+        ; field   ~qualifier:DynamicRO ~lifecycle
+            ~ty:(Set (Ref _pvs_proxy)) "proxies"
+            "The set of proxies associated with the site"
+        ]
+      ~messages:
+        [ introduce
+        ; forget
+        ; set_PVS_uuid
+        ]
+      ()
+end
+let pvs_site = PVS_site.obj
+
+module PVS_server = struct
+  let lifecycle = [Prototyped, rel_dundee_plus, ""]
+
+  let introduce = call
+      ~name:"introduce"
+      ~doc:"introduce new PVS server"
+      ~result:(Ref _pvs_server, "the new PVS server")
+      ~params:
+        [ Set(String),"addresses","IPv4 addresses of the server"
+        ; Int, "first_port", "first UDP port accepted by this server"
+        ; Int, "last_port", "last UDP port accepted by this server"
+        ; Ref(_pvs_site), "site", "PVS site this server is a part of"
+        ]
+      ~lifecycle
+      ~allowed_roles:_R_POOL_OP
+      ()
+
+  let forget = call
+      ~name:"forget"
+      ~doc:"forget a PVS server"
+      ~params:
+        [ Ref _pvs_server, "self", "this PVS server"
+        ]
+      ~lifecycle
+      ~allowed_roles:_R_POOL_OP
+      ()
+
+  let obj =
+    let null_ref = Some (VRef (Ref.string_of Ref.null)) in
+    let null_int = Some (VInt 0L) in
+    let null_set=  Some (VSet []) in
+    create_obj
+      ~name: _pvs_server
+      ~descr:"individual machine serving provisioning (block) data"
+      ~doccomments:[]
+      ~gen_constructor_destructor:false
+      ~gen_events:true
+      ~in_db:true
+      ~lifecycle
+      ~persist:PersistEverything
+      ~in_oss_since:None
+      ~messages_default_allowed_roles:_R_POOL_OP
+      ~contents:
+        [ uid     _pvs_server ~lifecycle
+
+        ; field   ~qualifier:StaticRO ~lifecycle
+            ~ty:(Set String) "addresses" ~default_value:null_set
+            "IPv4 addresses of this server"
+
+        ; field   ~qualifier:StaticRO ~lifecycle
+            ~ty:Int "first_port" ~default_value:null_int
+            "First UDP port accepted by this server"
+
+        ; field   ~qualifier:StaticRO ~lifecycle
+            ~ty:Int "last_port" ~default_value:null_int
+            "Last UDP port accepted by this server"
+
+        ; field   ~qualifier:StaticRO ~lifecycle
+            ~ty:(Ref _pvs_site) "site" ~default_value:null_ref
+            "PVS site this server is part of"
+        ]
+      ~messages:
+        [ introduce
+        ; forget
+        ]
+      ()
+end
+let pvs_server = PVS_server.obj
+
+module PVS_proxy = struct
+  let lifecycle = [Prototyped, rel_dundee_plus, ""]
+
+  let status = Enum ("pvs_proxy_status", [
+      "stopped", "The proxy is not currently running";
+      "initialised", "The proxy is setup but has not yet cached anything";
+      "caching", "The proxy is currently caching data";
+      "incompatible_write_cache_mode", "The PVS device is configured to use an incompatible write-cache mode";
+      "incompatible_protocol_version", "The PVS protocol in use is not compatible with the PVS proxy";
+    ])
+
+  let create = call
+      ~name:"create"
+      ~doc:"Configure a VM/VIF to use a PVS proxy"
+      ~result:(Ref _pvs_proxy, "the new PVS proxy")
+      ~params:
+        [ Ref _pvs_site   , "site","PVS site that we proxy for"
+        ; Ref _vif        , "VIF", "VIF for the VM that needs to be proxied"
+        ]
+      ~lifecycle
+      ~allowed_roles:_R_POOL_OP
+      ()
+
+  let destroy = call
+      ~name:"destroy"
+      ~doc:"remove (or switch off) a PVS proxy for this VM"
+      ~params:
+        [ Ref _pvs_proxy  , "self", "this PVS proxy"
+        ]
+      ~lifecycle
+      ~allowed_roles:_R_POOL_OP
+      ()
+
+  let obj =
+    let null_ref  = Some (VRef (Ref.string_of Ref.null)) in
+    let null_bool = Some (VBool false) in
+    create_obj
+      ~name: _pvs_proxy
+      ~descr:"a proxy connects a VM/VIF with a PVS site"
+      ~doccomments:[]
+      ~gen_constructor_destructor:false
+      ~gen_events:true
+      ~in_db:true
+      ~lifecycle
+      ~persist:PersistEverything
+      ~in_oss_since:None
+      ~messages_default_allowed_roles:_R_POOL_OP
+      ~contents:
+        [ uid     _pvs_proxy ~lifecycle
+
+        ; field   ~qualifier:StaticRO ~lifecycle
+            ~ty:(Ref _pvs_site) "site" ~default_value:null_ref
+            "PVS site this proxy is part of"
+
+        ; field   ~qualifier:StaticRO ~lifecycle
+            ~ty:(Ref _vif) "VIF" ~default_value:null_ref
+            "VIF of the VM using the proxy"
+
+        ; field   ~qualifier:DynamicRO ~lifecycle
+            ~ty:Bool "currently_attached" ~default_value:null_bool
+            "true = VM is currently proxied"
+
+        ; field   ~qualifier:DynamicRO ~lifecycle
+            ~ty:status "status" ~default_value:(Some (VEnum "stopped"))
+            "The run-time status of the proxy"
+        ]
+      ~messages:
+        [ create
+        ; destroy
+        ]
+      ()
+end
+let pvs_proxy = PVS_proxy.obj
+
+module PVS_cache_storage = struct
+  let lifecycle = [Prototyped, rel_ely, ""]
+
+  let obj =
+    let null_ref  = Some (VRef (Ref.string_of Ref.null)) in
+    create_obj
+      ~name: _pvs_cache_storage
+      ~descr:"Describes the storage that is available to a PVS site for caching purposes"
+      ~doccomments:[]
+      ~gen_constructor_destructor:true
+      ~gen_events:true
+      ~in_db:true
+      ~lifecycle
+      ~persist:PersistEverything
+      ~in_oss_since:None
+      ~messages_default_allowed_roles:_R_POOL_OP
+      ~contents:
+        [ uid     _pvs_cache_storage ~lifecycle
+
+        ; field   ~qualifier:StaticRO ~lifecycle
+            ~ty:(Ref _host) "host" ~default_value:null_ref
+            "The host on which this object defines PVS cache storage"
+
+        ; field   ~qualifier:StaticRO ~lifecycle
+            ~ty:(Ref _sr) "SR" ~default_value:null_ref
+            "SR providing storage for the PVS cache"
+
+        ; field   ~qualifier:StaticRO ~lifecycle
+            ~ty:(Ref _pvs_site) "site" ~default_value:null_ref
+            "The PVS_site for which this object defines the storage"
+
+        ; field   ~qualifier:StaticRO ~lifecycle
+            ~ty:Int "size" ~default_value:(Some (VInt (Int64.of_int (20 * 1024 * 1024 * 1024))))
+            "The size of the cache VDI (in bytes)"
+
+        ; field  ~qualifier:DynamicRO ~lifecycle
+            ~ty:(Ref _vdi) "VDI" ~default_value:null_ref
+            "The VDI used for caching"
+        ]
+
+      ~messages:
+        [ 
+        ]
+      ()
+end
+let pvs_cache_storage = PVS_cache_storage.obj
+
 (******************************************************************************************)
 
 (** All the objects in the system in order they will appear in documentation: *)
@@ -8819,6 +9126,10 @@ let all_system =
     gpu_group;
     vgpu;
     vgpu_type;
+    pvs_site;
+    pvs_server;
+    pvs_proxy;
+    pvs_cache_storage;
   ]
 
 (** These are the pairs of (object, field) which are bound together in the database schema *)
@@ -8897,6 +9208,9 @@ let all_relations =
 
     (_vdi, "metadata_of_pool"), (_pool, "metadata_VDIs");
     (_sr, "introduced_by"), (_dr_task, "introduced_SRs");
+    (_pvs_server, "site"), (_pvs_site, "servers");
+    (_pvs_proxy,  "site"), (_pvs_site, "proxies");
+    (_pvs_cache_storage,  "site"), (_pvs_site, "cache_storage");
   ]
 
 (** the full api specified here *)
@@ -8980,6 +9294,10 @@ let expose_get_all_messages_for = [
   _vgpu;
   _vgpu_type;
   _dr_task;
+  _pvs_site;
+  _pvs_server;
+  _pvs_proxy;
+  _pvs_cache_storage;
 ]
 
 let no_task_id_for = [ _task; (* _alert; *) _event ]
@@ -9054,7 +9372,6 @@ let http_actions = [
   ("get_message_rss_feed", (Get, Constants.message_rss_feed, false, [], _R_POOL_ADMIN, []));  (* not enabled in xapi *)
   ("put_messages", (Put, Constants.message_put_uri, false, [], _R_VM_POWER_ADMIN, []));
   ("connect_remotecmd", (Connect, Constants.remotecmd_uri, false, [], _R_POOL_ADMIN, []));
-  ("post_remote_stats", (Post, Constants.remote_stats_uri, false, [], _R_POOL_ADMIN, []));  (* deprecated *)
   ("get_wlb_report", (Get, Constants.wlb_report_uri, true,
                       [String_query_arg "report"; Varargs_query_arg], _R_READ_ONLY, []));
   ("get_wlb_diagnostics", (Get, Constants.wlb_diagnostics_uri, true, [], _R_READ_ONLY, []));

@@ -53,6 +53,10 @@ let base_suite =
     Test_dbsync_master.test;
     Test_xapi_xenops.test;
     Test_no_migrate.test;
+    Test_pvs_site.test;
+    Test_pvs_proxy.test;
+    Test_pvs_server.test;
+    Test_pvs_cache_storage.test;
   ]
 
 let handlers = [

@@ -77,6 +77,33 @@ let gc_VGPU_types ~__context =
       (String.concat "; " (List.map Ref.string_of (List.map fst garbage)));
     List.iter (fun (self, _) -> Db.VGPU_type.destroy ~__context ~self) garbage
 
+let gc_PVS_proxies ~__context =
+  gc_connector ~__context
+    Db.PVS_proxy.get_all
+    Db.PVS_proxy.get_record
+    (fun x -> valid_ref __context x.pVS_proxy_VIF)
+    (fun x -> valid_ref __context x.pVS_proxy_site)
+    Db.PVS_proxy.destroy
+
+(* A PVS server refers to a PVS site. We delete it, if the reference
+ * becomes invalid. At creation, the server is connected to a site and
+ * hence we never GC a server right after it was created. *)
+let gc_PVS_servers ~__context =
+  gc_connector ~__context
+    Db.PVS_server.get_all
+    Db.PVS_server.get_record
+    (fun x -> true)
+    (fun x -> valid_ref __context x.pVS_server_site)
+    Db.PVS_server.destroy
+
+let gc_PVS_cache_storage ~__context =
+  gc_connector ~__context
+    Db.PVS_cache_storage.get_all
+    Db.PVS_cache_storage.get_record
+    (fun x -> valid_ref __context x.pVS_cache_storage_site)
+    (fun x -> valid_ref __context x.pVS_cache_storage_host)
+    Db.PVS_cache_storage.destroy
+
 let gc_PIFs ~__context =
   gc_connector ~__context Db.PIF.get_all Db.PIF.get_record (fun x->valid_ref __context x.pIF_host) (fun x->valid_ref __context x.pIF_network)
     (fun ~__context ~self ->
@@ -559,6 +586,9 @@ let single_pass () =
               "Sessions", timeout_sessions;
               "Messages", gc_messages;
               "Consoles", gc_consoles;
+              "PVS proxies", gc_PVS_proxies;
+              "PVS servers", gc_PVS_servers;
+              "PVS cache storage", gc_PVS_cache_storage;
               (* timeout_alerts; *)
               (* CA-29253: wake up all blocked clients *)
               "Heartbeat", Xapi_event.heartbeat;
