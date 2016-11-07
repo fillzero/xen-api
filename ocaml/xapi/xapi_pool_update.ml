@@ -445,7 +445,16 @@ let resync_host ~__context ~host =
       ) update_refs;
     Create_misc.create_updates_requiring_reboot_info ~__context ~host
   end
-  else Db.Host.set_updates ~__context ~self:host ~value:[]
+  else Db.Host.set_updates ~__context ~self:host ~value:[];
+
+  (* Remove any pool_patch objects that don't have a corresponding pool_update object *)
+  let pool_patchs = Db.Pool_patch.get_all ~__context in
+  List.iter (
+      (fun pool_patch ->
+        let update_ref = Db.Pool_patch.get_pool_update ~__context ~self:pool_patch in
+        if update_ref = Ref.null then
+          Db.Pool_patch.destroy ~__context ~self:pool_patch
+    )) pool_patchs
 
 let pool_update_download_handler (req: Request.t) s _ =
   debug "pool_update.pool_update_download_handler URL %s" req.Request.uri;
