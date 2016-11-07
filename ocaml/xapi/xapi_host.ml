@@ -303,8 +303,8 @@ let get_vms_which_prevent_evacuation ~__context ~self =
   let get_error_per_vm vm plan acc =
     match plan with
     | Error(code, params) ->
-        if List.exists (fun (x,_) -> x = vm) acc then acc
-        else (vm, (code :: params)) :: acc
+      if List.exists (fun (x,_) -> x = vm) acc then acc
+      else (vm, (code :: params)) :: acc
     | _ -> acc
   in
   Hashtbl.fold get_error_per_vm plans []
@@ -446,7 +446,12 @@ let evacuate ~__context ~host =
            not (Db.VM.get_is_control_domain ~__context ~self:vm))
         vms
     in
-    assert (List.length vms = 0)
+    let remainder = List.length vms in
+    if not (remainder = 0) then
+      raise Api_errors.(Server_error(internal_error, [
+          Printf.sprintf "evacuate: %d VMs are still resident on %s"
+            remainder (Ref.string_of host)
+        ]))
   end
 
 let retrieve_wlb_evacuate_recommendations ~__context ~self =
@@ -632,7 +637,7 @@ let create ~__context ~uuid ~name_label ~name_description ~hostname ~address ~ex
     ~display:`enabled
     ~virtual_hardware_platform_versions:(if host_is_us then Xapi_globs.host_virtual_hardware_platform_versions else [0L])
     ~control_domain:Ref.null
-    ~patches_requiring_reboot:[]
+    ~updates_requiring_reboot:[]
   ;
   (* If the host we're creating is us, make sure its set to live *)
   Db.Host_metrics.set_last_updated ~__context ~self:metrics ~value:(Date.of_float (Unix.gettimeofday ()));
@@ -977,7 +982,20 @@ let call_plugin ~__context ~host ~plugin ~fn ~args =
 let call_extension ~__context ~host ~call =
   let rpc = Jsonrpc.call_of_string call in
   let response = Xapi_extensions.call_extension rpc in
-  Jsonrpc.string_of_response response
+  if response.Rpc.success then
+    response.Rpc.contents
+  else
+    let failure = response.Rpc.contents in
+    let protocol_failure () = raise Api_errors.(Server_error (extension_protocol_failure,[Jsonrpc.to_string failure])) in
+    match failure with
+    | Rpc.Enum (xs) -> begin
+        (* This really ought to be a list of strings... *)
+        match List.map (function | Rpc.String x -> x | _ -> protocol_failure ()) xs with
+        | x::xs -> raise (Api_errors.Server_error (x, xs))
+        | _ -> protocol_failure ()
+      end
+    | Rpc.String x -> raise (Api_errors.Server_error (x, []))
+    | _ -> protocol_failure ()
 
 let has_extension ~__context ~host ~name =
   try
@@ -1314,10 +1332,34 @@ let set_license_params ~__context ~self ~value =
   Pool_features.update_pool_features ~__context
 
 let apply_edition_internal  ~__context ~host ~edition ~additional =
-  let edition', features, additional =
-    V6client.apply_edition ~__context edition additional
+  (* Get localhost's current license state. *)
+  let license_server = Db.Host.get_license_server ~__context ~self:host in
+  let current_edition = Db.Host.get_edition ~__context ~self:host in
+  let current_license_params = Db.Host.get_license_params ~__context ~self:host in
+  (* Make sure the socket count in license_params is correct.
+     	 * At first boot, the key won't exist, and it may be wrong if we've restored
+     	 * a database dump from a different host. *)
+  let cpu_info = Db.Host.get_cpu_info ~__context ~self:host in
+  let socket_count = List.assoc "socket_count" cpu_info in
+  let current_license_params =
+    List.replace_assoc "sockets" socket_count current_license_params in
+  (* Construct the RPC params to be sent to v6d *)
+  let params =
+    ("current_edition", current_edition) ::
+    license_server @ current_license_params @ additional in
+  let edition', features', additional =
+    let open V6_interface in
+    let dbg = Context.string_of_task __context in
+    try
+      V6_client.apply_edition dbg edition params
+    with
+    | Invalid_edition e -> raise Api_errors.(Server_error(invalid_edition, [e]))
+    | License_processing_error -> raise Api_errors.(Server_error(license_processing_error, []))
+    | Missing_connection_details -> raise Api_errors.(Server_error(missing_connection_details, []))
+    | License_checkout_error s -> raise Api_errors.(Server_error(license_checkout_error, [s]))
   in
   Db.Host.set_edition ~__context ~self:host ~value:edition';
+  let features = Features.of_assoc_list features' in
   copy_license_to_db ~__context ~host ~features ~additional
 
 let apply_edition ~__context ~host ~edition ~force =
@@ -1346,9 +1388,7 @@ let license_add ~__context ~host ~contents =
            let s = "Failed to write temporary file." in
            raise Api_errors.(Server_error(internal_error, [s]))
        end;
-       let edition', features, additional = V6client.apply_edition ~__context "" ["license_file", tmp] in
-       Db.Host.set_edition ~__context ~self:host ~value:edition';
-       copy_license_to_db ~__context ~host ~features ~additional
+       apply_edition_internal ~__context ~host ~edition:"" ~additional:["license_file", tmp]
     )
     (fun () ->
        (* The license will have been moved to a standard location if it was valid, and
@@ -1357,10 +1397,7 @@ let license_add ~__context ~host ~contents =
     )
 
 let license_remove ~__context ~host =
-  let edition', features, additional =
-    V6client.apply_edition ~__context "" ["license_file", ""] in
-  Db.Host.set_edition ~__context ~self:host ~value:edition';
-  copy_license_to_db ~__context ~host ~features ~additional
+  apply_edition_internal ~__context ~host ~edition:"" ~additional:["license_file", ""]
 
 (* Supplemental packs *)
 

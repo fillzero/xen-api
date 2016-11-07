@@ -303,13 +303,14 @@ let remote_metadata_export_import ~__context ~rpc ~session_id ~remote_address ~r
 
 let vdi_of_req ~__context (req: Http.Request.t) =
   let all = req.Http.Request.query @ req.Http.Request.cookie in
-  let vdi =
     if List.mem_assoc "vdi" all
-    then List.assoc "vdi" all
-    else raise (Failure "Missing vdi query parameter") in
+  then
+    let vdi = List.assoc "vdi" all in
   if Db.is_valid_ref __context (Ref.of_string vdi)
-  then Ref.of_string vdi
-  else Db.VDI.get_by_uuid ~__context ~uuid:vdi
+    then Some (Ref.of_string vdi)
+    else Some (Db.VDI.get_by_uuid ~__context ~uuid:vdi)
+  else
+    None
 
 let base_vdi_of_req ~__context (req: Http.Request.t) =
   let all = req.Http.Request.query @ req.Http.Request.cookie in
@@ -319,6 +320,15 @@ let base_vdi_of_req ~__context (req: Http.Request.t) =
           then Ref.of_string base
           else Db.VDI.get_by_uuid ~__context ~uuid:base)
   end else None
+
+let sr_of_req ~__context (req: Http.Request.t) =
+  let all = Http.Request.(req.cookie @ req.query) in
+  if List.mem_assoc "sr_id" all
+  then Some (Ref.of_string (List.assoc "sr_id" all))
+  else
+  if List.mem_assoc "sr_uuid" all
+  then Some (Db.SR.get_by_uuid ~__context ~uuid:(List.assoc "sr_uuid" all))
+  else None
 
 module Format = struct
   type t =
@@ -357,7 +367,7 @@ end
 
 
 let return_302_redirect (req: Http.Request.t) s address =
-  let url = Printf.sprintf "%s://%s%s?%s" (if Context.is_unencrypted s then "http" else "https") address req.Http.Request.uri (String.concat "&" (List.map (fun (a,b) -> a^"="^b) req.Http.Request.query)) in
+  let url = Printf.sprintf "https://%s%s?%s" address req.Http.Request.uri (String.concat "&" (List.map (fun (a,b) -> a^"="^b) req.Http.Request.query)) in
   let headers = Http.http_302_redirect url in
   debug "HTTP 302 redirect to: %s" url;
   Http_svr.headers s headers

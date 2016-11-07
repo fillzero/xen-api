@@ -210,7 +210,7 @@ let host_license_of_r host_r editions =
   in
   let edition = host_r.API.host_edition in
   let edition_short = List.hd
-      (List.filter_map (fun (a, _, b, _) -> if a = edition then Some b else None) editions) in
+      (List.filter_map (fun (a, (_, b, _)) -> if a = edition then Some b else None) editions) in
   {
     hostname = host_r.API.host_hostname;
     uuid = host_r.API.host_uuid;
@@ -223,7 +223,7 @@ let host_license_of_r host_r editions =
 let diagnostic_license_status printer rpc session_id params =
   let hosts = Client.Host.get_all_records rpc session_id in
   let heading = [ "Hostname"; "UUID"; "Features"; "Code"; "Free"; "Expiry"; "Days left" ] in
-  let editions = V6client.get_editions "diagnostic_license_status" in
+  let editions = V6_client.get_editions "diagnostic_license_status" in
 
   let valid, invalid = List.partition (fun (_, host_r) -> try ignore(host_license_of_r host_r editions); true with _ -> false) hosts in
   let host_licenses = List.map (fun (_, host_r) -> host_license_of_r host_r editions) valid in
@@ -782,6 +782,7 @@ let gen_cmds rpc session_id =
     ; Client.Host_cpu.(mk get_all get_all_records_where get_by_uuid host_cpu_record "host-cpu" [] ["uuid";"number";"vendor";"speed";"utilisation"] rpc session_id)
     ; Client.Host_crashdump.(mk get_all get_all_records_where get_by_uuid host_crashdump_record "host-crashdump" [] ["uuid";"host";"timestamp";"size"] rpc session_id)
     ; Client.Pool_patch.(mk get_all get_all_records_where get_by_uuid pool_patch_record "patch" [] ["uuid"; "name-label"; "name-description"; "size"; "hosts"; "after-apply-guidance"] rpc session_id)
+    ; Client.Pool_update.(mk get_all get_all_records_where get_by_uuid pool_update_record "update" [] ["uuid"; "name-label"; "name-description"; "installation-size"; "hosts"; "after-apply-guidance"] rpc session_id)
     ; Client.VDI.(mk get_all get_all_records_where get_by_uuid vdi_record "vdi" [] ["uuid";"name-label";"name-description";"virtual-size";"read-only";"sharable";"sr-uuid"] rpc session_id)
     ; Client.VBD.(mk get_all get_all_records_where get_by_uuid vbd_record "vbd" [] ["uuid";"vm-uuid";"vm-name-label";"vdi-uuid";"device"; "empty"] rpc session_id)
     ; Client.SR.(mk get_all get_all_records_where get_by_uuid sr_record "sr" [] ["uuid";"name-label";"name-description";"host";"type";"content-type"] rpc session_id)
@@ -1653,7 +1654,7 @@ let vm_create printer rpc session_id params =
       ~version:0L
       ~generation_id:""
       ~hardware_platform_version:0L
-      ~has_vendor_device:false
+      ~has_vendor_device:false ~reference_label:""
   in
   let uuid=Client.VM.get_uuid rpc session_id vm in
   printer (Cli_printer.PList [uuid])
@@ -3138,8 +3139,8 @@ let with_license_server_changes printer rpc session_id params hosts f =
     end
   | Api_errors.Server_error (name, args) as e
     when name = Api_errors.invalid_edition ->
-    let editions = (V6client.get_editions "host_apply_edition")
-                   |> List.map (fun (x, _, _, _) -> x)
+    let editions = (V6_client.get_editions "host_apply_edition")
+                   |> List.map (fun (x, _) -> x)
                    |> String.concat ", "
     in
     printer (Cli_printer.PStderr ("Valid editions are: " ^ editions ^ "\n"));
@@ -3157,7 +3158,7 @@ let host_apply_edition printer rpc session_id params =
     (fun rpc session_id -> Client.Host.apply_edition rpc session_id host edition false)
 
 let host_all_editions printer rpc session_id params =
-  let editions = List.map (fun (e, _, _, _) -> e) (V6client.get_editions "host_all_editions") in
+  let editions = List.map (fun (e, _) -> e) (V6_client.get_editions "host_all_editions") in
   printer (Cli_printer.PList editions)
 
 let host_evacuate printer rpc session_id params =
@@ -4287,8 +4288,10 @@ let patch_upload fd printer rpc session_id params =
   let filename = List.assoc "file-name" params in
   let make_command task_id =
     let prefix = uri_of_someone rpc session_id Master in
-    let uri = Printf.sprintf "%s%s?session_id=%s&task_id=%s"
-        prefix Constants.pool_patch_upload_uri (Ref.string_of session_id) (Ref.string_of task_id) in
+    let pools = Client.Pool.get_all rpc session_id in
+    let default_sr = Client.Pool.get_default_SR ~rpc ~session_id ~self:(List.hd pools) in
+    let uri = Printf.sprintf "%s%s?session_id=%s&sr_id=%s&task_id=%s"
+        prefix Constants.pool_patch_upload_uri (Ref.string_of session_id) (Ref.string_of default_sr)(Ref.string_of task_id) in
     let _ = debug "trying to post patch to uri:%s" uri in
     HttpPut (filename, uri) in
   let result = track_http_operation fd rpc session_id make_command "host patch upload" in
@@ -4298,17 +4301,28 @@ let patch_upload fd printer rpc session_id params =
 
 let update_upload fd printer rpc session_id params =
   let filename = List.assoc "file-name" params in
-  let host_uuid = List.assoc "host-uuid" params in
-  let host = Client.Host.get_by_uuid rpc session_id host_uuid in
   let make_command task_id =
-    let prefix = uri_of_someone rpc session_id (SpecificHost host) in
-    let uri = Printf.sprintf "%s%s?session_id=%s&task_id=%s"
-        prefix Constants.oem_patch_stream_uri (Ref.string_of session_id) (Ref.string_of task_id) in
-    let _ = debug "trying to post patch to uri:%s" uri in
-    HttpPut (filename, uri)
+    let prefix = uri_of_someone rpc session_id Master in
+    let pools = Client.Pool.get_all rpc session_id in
+    let sr =
+      if List.mem_assoc "sr-uuid" params
+      then Client.SR.get_by_uuid rpc session_id (List.assoc "sr-uuid" params)
+      else Client.Pool.get_default_SR ~rpc ~session_id ~self:(List.hd pools)
   in
+    let uri = Printf.sprintf "%s%s?session_id=%s&sr_id=%s&task_id=%s"
+        prefix Constants.import_raw_vdi_uri (Ref.string_of session_id) (Ref.string_of sr)(Ref.string_of task_id) in
+    let _ = debug "trying to post patch to uri:%s" uri in
+    HttpPut (filename, uri) in
   let result = track_http_operation fd rpc session_id make_command "host patch upload" in
-  marshal fd (Command (Print result))
+  let vdi_ref = API.Legacy.From.ref_VDI "" (Xml.parse_string result) in
+  let update_ref = 
+    try Client.Pool_update.introduce rpc session_id vdi_ref 
+    with e ->
+      Client.VDI.destroy rpc session_id vdi_ref; 
+      raise e 
+  in
+  let update_uuid = Client.Pool_update.get_uuid rpc session_id update_ref in
+  marshal fd (Command (Print update_uuid))
 
 let patch_clean printer rpc session_id params =
   let uuid = List.assoc "uuid" params in
@@ -4776,3 +4790,50 @@ module PVS_cache_storage = struct
     let ref   = Client.PVS_cache_storage.get_by_uuid ~rpc ~session_id ~uuid in
     Client.PVS_cache_storage.destroy rpc session_id ref
 end
+
+let update_introduce printer rpc session_id params =
+  let vdi_uuid = List.assoc "vdi-uuid" params in
+  let vdi_ref = Client.VDI.get_by_uuid rpc session_id vdi_uuid in
+  let update = Client.Pool_update.introduce rpc session_id vdi_ref in
+  let uuid = Client.Pool_update.get_uuid ~rpc ~session_id ~self:update in
+  printer (Cli_printer.PList [uuid])
+
+let livepatch_status_to_string state =
+  match state with
+  | `ok -> "Ok."
+  | `ok_livepatch_complete -> "Ok: Patch can be applied without reboot."
+  | `ok_livepatch_incomplete -> "Ok: Patch can be applied, but a reboot will be required."
+
+let update_precheck printer rpc session_id params =
+  let uuid = List.assoc "uuid" params in
+  let result = do_host_op rpc session_id (fun _ host ->
+    let host_ref = host.getref () in
+    let ref = Client.Pool_update.get_by_uuid rpc session_id uuid in
+    Client.Pool_update.precheck rpc session_id ref host_ref ) params ["uuid"] in
+  let result_msg = List.map livepatch_status_to_string result in
+  printer (Cli_printer.PList result_msg)
+
+let update_apply printer rpc session_id params =
+  let uuid = List.assoc "uuid" params in
+  ignore(
+    do_host_op rpc session_id (fun _ host ->
+        let host_ref = host.getref () in
+        let ref = Client.Pool_update.get_by_uuid rpc session_id uuid in
+        Client.Pool_update.apply rpc session_id ref host_ref
+      ) params ["uuid"]
+  )
+
+let update_pool_apply printer rpc session_id params =
+  let uuid = List.assoc "uuid" params in
+  let ref = Client.Pool_update.get_by_uuid rpc session_id uuid in
+  Client.Pool_update.pool_apply rpc session_id ref
+
+let update_pool_clean printer rpc session_id params =
+  let uuid = List.assoc "uuid" params in
+  let ref = Client.Pool_update.get_by_uuid rpc session_id uuid in
+  Client.Pool_update.pool_clean rpc session_id ref
+
+let update_destroy printer rpc session_id params =
+  let uuid = List.assoc "uuid" params in
+  let ref = Client.Pool_update.get_by_uuid rpc session_id uuid in
+  Client.Pool_update.destroy rpc session_id ref

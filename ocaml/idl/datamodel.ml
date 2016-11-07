@@ -18,7 +18,7 @@ open Datamodel_types
 (* IMPORTANT: Please bump schema vsn if you change/add/remove a _field_.
               You do not have to bump vsn if you change/add/remove a message *)
 let schema_major_vsn = 5
-let schema_minor_vsn = 106
+let schema_minor_vsn = 108
 
 (* Historical schema versions just in case this is useful later *)
 let rio_schema_major_vsn = 5
@@ -137,6 +137,7 @@ let _alert = "alert"
 let _crashdump = "crashdump"
 let _pool = "pool"
 let _pool_patch = "pool_patch"
+let _pool_update = "pool_update"
 let _data_source = "data_source"
 let _blob = "blob"
 let _message = "message"
@@ -1158,6 +1159,8 @@ let _ =
     ~doc:"The requested update could to be obtained from the master." ();
   error Api_errors.patch_already_exists [ "uuid" ]
     ~doc:"The uploaded patch file already exists" ();
+  error Api_errors.update_already_exists [ "uuid" ]
+    ~doc:"The uploaded update already exists" ();
   error Api_errors.patch_is_applied [ ]
     ~doc:"The specified patch is applied and cannot be destroyed." ();
   error Api_errors.patch_already_applied [ "patch" ]
@@ -1187,6 +1190,32 @@ let _ =
     ~doc:"This command is only allowed on the OEM edition." ();
   error Api_errors.not_allowed_on_oem_edition ["command"]
     ~doc:"This command is not allowed on the OEM edition." ();
+
+  (* Update errors *)
+  error Api_errors.invalid_update [ "info" ]
+    ~doc:"The uploaded update package is invalid." ();
+  error Api_errors.update_is_applied [ ]
+    ~doc:"The specified update has been applied and cannot be destroyed." ();
+  error Api_errors.cannot_find_update []
+    ~doc:"The requested update could not be found. Please upload the update again. This can occur when you run xe update-pool-clean before xe update-apply. " ();
+  error Api_errors.update_pool_apply_failed [ "hosts" ]
+    ~doc:"The update cannot be applied for the following host(s)." ();
+  error Api_errors.update_apply_failed [ "output" ]
+    ~doc:"The update failed to apply. Please see attached output." ();
+  error Api_errors.update_already_applied [ "update" ]
+    ~doc:"This update has already been applied." ();
+  error Api_errors.update_already_applied_in_pool [ "update" ]
+    ~doc:"This update has already been applied to all hosts in the pool." ();
+  error Api_errors.update_precheck_failed_unknown_error [ "update"; "info" ]
+    ~doc:"The update precheck stage failed with an unknown error." ();
+  error Api_errors.update_precheck_failed_prerequisite_missing [ "update"; "info" ]
+    ~doc:"The update precheck stage failed: prerequisite update(s) are missing." ();
+  error Api_errors.update_precheck_failed_conflict_present ["update"; "info"]
+    ~doc:"The update precheck stage failed: conflicting updates are present." ();
+  error Api_errors.update_precheck_failed_wrong_server_version ["update"; "info"]
+    ~doc:"The update precheck stage failed: the server is of an incorrect version." ();
+  error Api_errors.update_precheck_failed_out_of_space ["update"; "available_space"; "required_space "]
+    ~doc:"The update precheck stage failed: the server does not have enough space." ();
 
   (* Pool errors *)
 
@@ -1355,6 +1384,9 @@ let _ =
 
   error Api_errors.vm_is_immobile ["VM"]
     ~doc:"The VM is configured in a way that prevents it from being mobile." ();
+
+  error Api_errors.vm_is_using_nested_virt ["VM"]
+    ~doc:"This operation is illegal because the VM is using nested virtualisation." ();
 
   (* PVS errors *)
   error Api_errors.pvs_site_contains_running_proxies ["proxies"]
@@ -3141,11 +3173,13 @@ let host_has_extension = call
 let host_call_extension = call
     ~name:"call_extension"
     ~in_product_since:rel_dundee_plus
+    ~custom_marshaller:true
     ~doc:"Call a XenAPI extension on this host"
     ~params:[Ref _host, "host", "The host";
              String, "call", "Rpc call for the extension";]
     ~result:(String, "Result from the extension")
     ~allowed_roles:_R_POOL_ADMIN
+    ~flags:[`Session] (* no async *)
     ()
 
 let host_enable_binary_storage = call
@@ -3347,8 +3381,14 @@ let vbd_unplug_force = call
 
 let vbd_unplug_force_no_safety_check = call
     ~name:"unplug_force_no_safety_check"
-    ~doc:"Forcibly unplug the specified VBD without any safety checks. This is an extremely dangerous operation in the general case that can cause guest crashes and data corruption; it should be called with extreme caution."
+    ~doc:"Deprecated: use 'unplug_force' instead. Forcibly unplug \
+          the specified VBD without any safety checks. This is an \
+          extremely dangerous operation in the general case that \
+          can cause guest crashes and data corruption; it should \
+          be called with extreme caution. Functionally equivalent \
+          with 'unplug_force'."
     ~params:[Ref _vbd, "self", "The VBD to forcibly unplug (no safety checks are applied to test if the device supports surprise-remove)"]
+    ~internal_deprecated_since:rel_ely
     ~hide_from_docs:true
     ~in_product_since:rel_symc
     ~allowed_roles:_R_VM_ADMIN
@@ -3638,7 +3678,7 @@ let sr_scan = call
     ~in_product_since:rel_rio
     ~doc:"Refreshes the list of VDIs associated with an SR"
     ~params:[Ref _sr, "sr", "The SR to scan" ]
-    ~allowed_roles:_R_POOL_OP
+    ~allowed_roles:_R_VM_POWER_ADMIN
     ()
 
 (* Nb, although this is a new explicit call, it's actually been in the API since rio - just autogenerated. So no setting of rel_miami. *)
@@ -3960,6 +4000,149 @@ let host_crashdump =
       ]
     ()
 
+(* New Ely pool update mechanism *)
+let livepatch_status =
+  Enum ("livepatch_status",
+        [
+          "ok_livepatch_complete", "An applicable live patch exists for every required component";
+          "ok_livepatch_incomplete", "An applicable live patch exists but it is not sufficient";
+          "ok", "There is no applicable live patch"
+        ])
+    
+
+let pool_update_after_apply_guidance =
+  Enum ("update_after_apply_guidance",
+        [ "restartHVM",  "This update requires HVM guests to be restarted once applied.";
+          "restartPV",   "This update requires PV guests to be restarted once applied.";
+          "restartHost", "This update requires the host to be restarted once applied.";
+          "restartXAPI", "This update requires XAPI to be restarted once applied.";
+        ])
+
+let pool_update_introduce = call
+    ~name:"introduce"
+    ~doc:"Introduce update VDI"
+    ~in_oss_since:None
+    ~in_product_since:rel_ely
+    ~params:[ Ref _vdi, "vdi", "The VDI which contains a software update." ]
+    ~result:(Ref _pool_update, "the introduced pool update")
+    ~allowed_roles:_R_POOL_OP
+    ()
+
+let pool_update_precheck = call
+    ~name:"precheck"
+    ~doc:"Execute the precheck stage of the selected update on a host"
+    ~in_oss_since:None
+    ~in_product_since:rel_ely
+    ~params:[ Ref _pool_update, "self", "The update whose prechecks will be run"; Ref _host, "host", "The host to run the prechecks on." ]
+    ~result:(livepatch_status, "The precheck pool update")
+    ~allowed_roles:_R_POOL_OP
+    ~forward_to:(HostExtension "pool_update.precheck")
+    ()
+
+let pool_update_apply = call
+    ~name:"apply"
+    ~doc:"Apply the selected update to a host"
+    ~in_oss_since:None
+    ~in_product_since:rel_ely
+    ~params:[ Ref _pool_update, "self", "The update to apply"; Ref _host, "host", "The host to apply the update to." ]
+    ~allowed_roles:_R_POOL_OP
+    ~forward_to:(HostExtension "pool_update.apply")
+    ()
+
+let pool_update_pool_apply = call
+    ~name:"pool_apply"
+    ~doc:"Apply the selected update to all hosts in the pool"
+    ~in_oss_since:None
+    ~in_product_since:rel_ely
+    ~params:[ Ref _pool_update, "self", "The update to apply"]
+    ~allowed_roles:_R_POOL_OP
+    ()
+
+let pool_update_pool_clean = call
+    ~name:"pool_clean"
+    ~doc:"Removes the update's files from all hosts in the pool, but does not revert the update"
+    ~in_oss_since:None
+    ~in_product_since:rel_ely
+    ~params:[ Ref _pool_update, "self", "The update to clean up" ]
+    ~allowed_roles:_R_POOL_OP
+    ()
+
+let pool_update_destroy = call
+    ~name:"destroy"
+    ~doc:"Removes the database entry. Only works on unapplied update."
+    ~in_oss_since:None
+    ~in_product_since:rel_ely
+    ~params:[ Ref _pool_update, "self", "The update to destroy" ]
+    ~allowed_roles:_R_POOL_OP
+    ()
+
+let pool_update_attach = call
+    ~name:"attach"
+    ~hide_from_docs:true
+    ~doc:"Attach the pool update VDI"
+    ~in_oss_since:None
+    ~in_product_since:rel_ely
+    ~params:[ Ref _pool_update, "self", "The update to be attached"]
+    ~result:(String, "The file URL of pool update")
+    ~allowed_roles:_R_POOL_OP
+    ()
+
+let pool_update_detach = call
+    ~name:"detach"
+    ~hide_from_docs:true
+    ~doc:"Detach the pool update VDI"
+    ~in_oss_since:None
+    ~in_product_since:rel_ely
+    ~params:[ Ref _pool_update, "self", "The update to be detached"]
+    ~allowed_roles:_R_POOL_OP
+    ()
+
+let pool_update_resync_host = call
+    ~name:"resync_host"
+    ~hide_from_docs:true
+    ~doc:"Resync the applied updates of the host"
+    ~in_oss_since:None
+    ~in_product_since:rel_ely
+    ~params:[ Ref _host, "host", "The host to resync the applied updates"]
+    ~allowed_roles:_R_POOL_OP
+    ()
+
+let pool_update =
+  create_obj ~in_db:true
+    ~in_product_since:rel_ely
+    ~in_oss_since:None
+    ~internal_deprecated_since:None
+
+    ~persist:PersistEverything
+    ~gen_constructor_destructor:false
+    ~gen_events:true
+
+    ~name:_pool_update
+    ~descr:"Pool-wide updates to the host software"
+    ~doccomments:[]
+    ~messages_default_allowed_roles:_R_POOL_OP
+    ~messages:[
+      pool_update_introduce;
+      pool_update_precheck;
+      pool_update_apply;
+      pool_update_pool_apply;
+      pool_update_pool_clean;
+      pool_update_destroy;
+      pool_update_attach;
+      pool_update_detach;
+      pool_update_resync_host;
+    ]
+    ~contents:
+      [ uid       ~in_oss_since:None _pool_update;
+        namespace ~name:"name" ~contents:(names None StaticRO) ();
+        field     ~in_product_since:rel_ely ~default_value:(Some (VInt Int64.zero)) ~in_oss_since:None ~qualifier:StaticRO ~ty:Int "installation_size" "Size of the update in bytes";
+        field     ~in_product_since:rel_ely ~default_value:(Some (VString "")) ~in_oss_since:None ~qualifier:StaticRO ~ty:String "key" "GPG key of the update";
+        field     ~in_product_since:rel_ely ~default_value:(Some (VSet [])) ~in_oss_since:None ~qualifier:StaticRO ~ty:(Set pool_update_after_apply_guidance) "after_apply_guidance" "What the client should do after this update has been applied.";
+        field     ~in_oss_since:None ~qualifier:StaticRO ~ty:(Ref _vdi) "vdi" "VDI the update was uploaded to";
+        field     ~in_product_since:rel_ely ~in_oss_since:None ~qualifier:DynamicRO ~ty:(Set (Ref _host)) "hosts" "The hosts that have applied this update.";
+      ]
+    ()
+
 (* New Miami pool patching mechanism *)
 
 let pool_patch_after_apply_guidance =
@@ -3978,6 +4161,7 @@ let pool_patch_apply = call
     ~params:[ Ref _pool_patch, "self", "The patch to apply"; Ref _host, "host", "The host to apply the patch too" ]
     ~result:(String, "the output of the patch application process")
     ~allowed_roles:_R_POOL_OP
+    ~internal_deprecated_since:rel_ely
     ()
 
 let pool_patch_precheck = call
@@ -3988,6 +4172,7 @@ let pool_patch_precheck = call
     ~params:[ Ref _pool_patch, "self", "The patch whose prechecks will be run"; Ref _host, "host", "The host to run the prechecks on" ]
     ~result:(String, "the output of the patch prechecks")
     ~allowed_roles:_R_POOL_OP
+    ~internal_deprecated_since:rel_ely
     ()
 
 let pool_patch_clean = call
@@ -3997,6 +4182,7 @@ let pool_patch_clean = call
     ~in_product_since:rel_miami
     ~params:[ Ref _pool_patch, "self", "The patch to clean up" ]
     ~allowed_roles:_R_POOL_OP
+    ~internal_deprecated_since:rel_ely
     ()
 
 let pool_patch_clean_on_host = call
@@ -4006,6 +4192,7 @@ let pool_patch_clean_on_host = call
     ~in_product_since:rel_tampa
     ~params:[ Ref _pool_patch, "self", "The patch to clean up"; Ref _host, "host", "The host on which to clean the patch"  ]
     ~allowed_roles:_R_POOL_OP
+    ~internal_deprecated_since:rel_ely
     ()
 
 let pool_patch_pool_clean = call
@@ -4015,6 +4202,7 @@ let pool_patch_pool_clean = call
     ~in_product_since:rel_tampa
     ~params:[ Ref _pool_patch, "self", "The patch to clean up" ]
     ~allowed_roles:_R_POOL_OP
+    ~internal_deprecated_since:rel_ely
     ()
 
 let pool_patch_destroy = call
@@ -4024,6 +4212,7 @@ let pool_patch_destroy = call
     ~in_product_since:rel_miami
     ~params:[ Ref _pool_patch, "self", "The patch to destroy" ]
     ~allowed_roles:_R_POOL_OP
+    ~internal_deprecated_since:rel_ely
     ()
 
 let pool_patch_pool_apply = call
@@ -4033,13 +4222,14 @@ let pool_patch_pool_apply = call
     ~in_product_since:rel_miami
     ~params:[ Ref _pool_patch, "self", "The patch to apply"]
     ~allowed_roles:_R_POOL_OP
+    ~internal_deprecated_since:rel_ely
     ()
 
 let pool_patch =
   create_obj ~in_db:true
     ~in_product_since:rel_miami
     ~in_oss_since:None
-    ~internal_deprecated_since:None
+    ~internal_deprecated_since:(Some rel_ely)
 
     ~persist:PersistEverything
     ~gen_constructor_destructor:false
@@ -4059,6 +4249,7 @@ let pool_patch =
         field     ~in_product_since:rel_miami ~default_value:(Some (VBool false)) ~in_oss_since:None ~qualifier:DynamicRO ~ty:Bool "pool_applied" "This patch should be applied across the entire pool";
         field     ~in_product_since:rel_miami ~in_oss_since:None ~qualifier:DynamicRO ~ty:(Set (Ref _host_patch)) "host_patches" "This hosts this patch is applied to.";
         field     ~in_product_since:rel_miami ~default_value:(Some (VSet [])) ~in_oss_since:None ~qualifier:DynamicRO ~ty:(Set pool_patch_after_apply_guidance) "after_apply_guidance" "What the client should do after this patch has been applied.";
+        field     ~in_product_since:rel_ely   ~default_value:(Some (VRef (Ref.string_of Ref.null))) ~in_oss_since:None ~qualifier:StaticRO ~ty:(Ref _pool_update) "pool_update" "A reference to the associated pool_update object";
         field     ~in_product_since:rel_miami ~default_value:(Some (VMap [])) ~in_oss_since:None  ~ty:(Map(String, String)) "other_config" "additional configuration";
       ]
     ()
@@ -4088,7 +4279,7 @@ let host_patch_apply = call
     ()
 
 let host_patch =
-  create_obj ~in_db:true ~in_product_since:rel_rio ~in_oss_since:None ~internal_deprecated_since:None ~persist:PersistEverything ~gen_constructor_destructor:false ~name:_host_patch ~gen_events:true
+  create_obj ~in_db:true ~in_product_since:rel_rio ~in_oss_since:None ~internal_deprecated_since:(Some rel_ely) ~persist:PersistEverything ~gen_constructor_destructor:false ~name:_host_patch ~gen_events:true
     ~descr:"Represents a patch stored on a server"
     ~doccomments:[]
     ~messages_default_allowed_roles:_R_POOL_OP
@@ -4749,7 +4940,8 @@ let host =
          field ~qualifier:RW ~ty:(Ref _sr) "suspend_image_sr" "The SR in which VDIs for suspend images are created";
          field ~qualifier:RW ~ty:(Ref _sr) "crash_dump_sr" "The SR in which VDIs for crash dumps are created";
          field ~in_oss_since:None ~qualifier:DynamicRO ~ty:(Set (Ref _host_crashdump)) "crashdumps" "Set of host crash dumps";
-         field ~in_oss_since:None ~qualifier:DynamicRO ~ty:(Set (Ref _host_patch)) "patches" "Set of host patches";
+         field ~in_oss_since:None ~internal_deprecated_since:rel_ely ~qualifier:DynamicRO ~ty:(Set (Ref _host_patch)) "patches" "Set of host patches";
+         field ~in_oss_since:None ~in_product_since:rel_ely ~qualifier:DynamicRO ~ty:(Set (Ref _pool_update)) "updates" "Set of updates";
          field ~qualifier:DynamicRO ~ty:(Set (Ref _pbd)) "PBDs" "physical blockdevices";
          field ~qualifier:DynamicRO ~ty:(Set (Ref _hostcpu)) "host_CPUs" "The physical CPUs on this host";
          field ~qualifier:DynamicRO ~in_product_since:rel_midnight_ride ~default_value:(Some (VMap [])) ~ty:(Map(String, String)) "cpu_info" "Details about the physical CPUs on this host";
@@ -4780,7 +4972,7 @@ let host =
          field ~qualifier:RW ~in_product_since:rel_cream ~default_value:(Some (VEnum "enabled")) ~ty:host_display "display" "indicates whether the host is configured to output its console to a physical display device";
          field ~qualifier:DynamicRO ~in_product_since:rel_cream ~default_value:(Some (VSet [VInt 0L])) ~ty:(Set (Int)) "virtual_hardware_platform_versions" "The set of versions of the virtual hardware platform that the host can offer to its guests";
          field ~qualifier:DynamicRO ~default_value:(Some (VRef (Ref.string_of Ref.null))) ~in_product_since:rel_dundee_plus ~ty:(Ref _vm) "control_domain" "The control domain (domain 0)";
-         field ~qualifier:DynamicRO ~lifecycle:[Published, rel_ely, ""] ~ty:(Set (Ref _pool_patch)) ~ignore_foreign_key:true "patches_requiring_reboot" "List of patches which require reboot";
+         field ~qualifier:DynamicRO ~lifecycle:[Published, rel_ely, ""] ~ty:(Set (Ref _pool_update)) ~ignore_foreign_key:true "updates_requiring_reboot" "List of updates which require reboot";
        ])
     ()
 
@@ -6223,7 +6415,7 @@ let vdi =
          field ~in_oss_since:None ~in_product_since:rel_miami ~ty:String ~qualifier:DynamicRO ~default_value:(Some (VString "")) "location" "location information";
          field ~in_oss_since:None ~ty:Bool ~qualifier:DynamicRO "managed" "";
          field ~in_oss_since:None ~ty:Bool ~qualifier:DynamicRO "missing" "true if SR scan operation reported this VDI as not present on disk";
-         field ~in_oss_since:None ~ty:(Ref _vdi) ~qualifier:DynamicRO "parent" "References the parent disk, if this VDI is part of a chain";
+         field ~in_oss_since:None ~ty:(Ref _vdi) ~qualifier:DynamicRO ~lifecycle:[Published, rel_rio, ""; Deprecated, rel_ely, "The field was never used."] "parent" "This field is always null. Deprecated";
          field ~in_oss_since:None ~ty:(Map(String, String)) ~in_product_since:rel_miami ~qualifier:RW "xenstore_data" "data to be inserted into the xenstore tree (/local/domain/0/backend/vbd/<domid>/<device-id>/sm-data) after the VDI is attached. This is generally set by the SM backends on vdi_attach." ~default_value:(Some (VMap []));
          field ~in_oss_since:None ~ty:(Map(String, String)) ~in_product_since:rel_miami ~qualifier:RW "sm_config" "SM dependent data" ~default_value:(Some (VMap []));
 
@@ -7506,7 +7698,8 @@ let vm =
              "vendor_device_allowed && policy_says_its_ok) with e -> D.error \"Failure when defaulting has_vendor_device field: %s\" (Printexc.to_string e); Rpc.Bool false)"], VBool false)))
            ~ty:Bool "has_vendor_device" "When an HVM guest starts, this controls the presence of the emulated C000 PCI device which triggers Windows Update to fetch or update PV drivers.";
          field ~qualifier:DynamicRO ~ty:Bool ~lifecycle:[Published, rel_ely, ""] ~default_value:(Some (VBool false))
-           "requires_reboot" "Indicates whether a VM requires a reboot in order to update its configuration, e.g. its memory allocation."
+           "requires_reboot" "Indicates whether a VM requires a reboot in order to update its configuration, e.g. its memory allocation.";
+         field ~qualifier:StaticRO ~ty:String ~in_product_since:rel_ely ~default_value:(Some (VString "")) "reference_label" "Textual reference to the template used to create a VM. This can be used by clients in need of an immutable reference to the template since the latter's uuid and name_label may change, for example, after a package installation or upgrade."
        ])
     ()
 
@@ -9083,6 +9276,7 @@ let all_system =
 
     pool;
     pool_patch;
+    pool_update;
 
     vm;
     vm_metrics;
@@ -9186,6 +9380,8 @@ let all_relations =
     (_host_patch, "host"), (_host, "patches");
     (_host_patch, "pool_patch"), (_pool_patch, "host_patches");
 
+    (_host, "updates"), (_pool_update, "hosts");
+
     (_subject, "roles"), (_subject, "roles");
     (*(_subject, "roles"), (_role, "subjects");*)
     (_role, "subroles"), (_role, "subroles");
@@ -9279,6 +9475,7 @@ let expose_get_all_messages_for = [
   _pool;
   _sm;
   _pool_patch;
+  _pool_update;
   _bond;
   _vlan;
   _blob;
@@ -9385,6 +9582,7 @@ let http_actions = [
   ("post_json_options", (Options, Constants.json_uri, false, [], _R_READ_ONLY, []));
   ("post_jsonrpc", (Post, Constants.jsonrpc_uri, false, [], _R_READ_ONLY, []));
   ("post_jsonrpc_options", (Options, Constants.jsonrpc_uri, false, [], _R_READ_ONLY, []));
+  ("get_pool_update_download", (Get, Constants.get_pool_update_download_uri, false, [], _R_READ_ONLY, []));
 ]
 
 (* these public http actions will NOT be checked by RBAC *)
@@ -9402,10 +9600,10 @@ let public_http_actions_with_no_rbac_check =
     "post_json_options";
     "post_jsonrpc";
     "post_jsonrpc_options";
+    "get_pool_update_download";
   ]
 
 (* permissions not associated with any object message or field *)
 let extra_permissions = [
   (extra_permission_task_destroy_any, _R_POOL_OP); (* only POOL_OP can destroy any tasks *)
 ]
-

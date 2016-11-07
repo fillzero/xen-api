@@ -221,6 +221,16 @@ let unpause ~__context ~vm =
 let set_xenstore_data ~__context ~self ~value =
   Xapi_xenops.set_xenstore_data ~__context ~self value
 
+(* CP-18860: check memory limits if using nested_virt on start *)
+let assert_memory_constraints ~__context ~vm platformdata =
+  if Vm_platform.is_true ~key:"nested-virt" ~platformdata ~default:false
+  then
+    begin
+      let module C = Xapi_vm_memory_constraints.Vm_memory_constraints in
+      let c = C.get ~__context ~vm_ref:vm in
+      C.assert_valid_and_pinned_at_static_max c
+    end
+
 (* Note: it is important that we use the pool-internal API call, VM.atomic_set_resident_on, to set resident_on and clear
    scheduled_to_be_resident_on atomically. This prevents concurrent API calls on the master from accounting for the
    same VM twice during memory calculations to determine whether a given VM can start on a particular host..
@@ -234,6 +244,9 @@ let start ~__context ~vm ~start_paused ~force =
     debug "Setting ha_always_run on vm=%s as true during VM.start" (Ref.string_of vm)
   end;
 
+  if not force then
+    assert_memory_constraints ~__context ~vm vmr.API.vM_platform;
+
   (* Check to see if we're using any restricted platform kvs. This raises
      	   an exception if so *)
   Vm_platform.check_restricted_flags ~__context vmr.API.vM_platform;
@@ -241,9 +254,7 @@ let start ~__context ~vm ~start_paused ~force =
   (* Clear out any VM guest metrics record. Guest metrics will be updated by
      	 * the running VM and for now they might be wrong, especially network
      	 * addresses inherited by a cloned VM. *)
-  let vm_gm = Db.VM.get_guest_metrics ~__context ~self:vm in
-  Db.VM.set_guest_metrics ~__context ~self:vm ~value:Ref.null;
-  (try Db.VM_guest_metrics.destroy ~__context ~self:vm_gm with _ -> ());
+  Xapi_vm_helpers.delete_guest_metrics ~__context ~self:vm;
 
   (* This makes sense here while the available versions are 0, 1 and 2.
      	 * If/when we introduce another version, we must reassess this. *)
@@ -253,7 +264,7 @@ let start ~__context ~vm ~start_paused ~force =
   Cpuid_helpers.reset_cpu_flags ~__context ~vm;
 
   (* If the VM has any vGPUs, gpumon must remain stopped until the
-     	 * VM has started. *)
+     * VM has started. *)
   begin
     match vmr.API.vM_VGPUs with
     | [] -> Xapi_xenops.start ~__context ~self:vm start_paused force
@@ -455,7 +466,7 @@ let create ~__context ~name_label ~name_description
     ~version
     ~generation_id
     ~hardware_platform_version
-    ~has_vendor_device
+    ~has_vendor_device ~reference_label
   : API.ref_VM =
 
   if has_vendor_device then
@@ -537,7 +548,7 @@ let create ~__context ~name_label ~name_description
     ~generation_id
     ~hardware_platform_version
     ~has_vendor_device
-    ~requires_reboot:false
+    ~requires_reboot:false ~reference_label
   ;
   Db.VM.set_power_state ~__context ~self:vm_ref ~value:`Halted;
   Xapi_vm_lifecycle.update_allowed_operations ~__context ~self:vm_ref;
@@ -1045,7 +1056,8 @@ let set_suspend_VDI ~__context ~self ~value =
       match !r with
       | `Succ cs -> cs
       | `Fail e -> raise e
-      | `Pending -> assert false in
+      | `Pending -> raise Api_errors.(Server_error(internal_error, ["set_suspend_VDI: The operation is still `Pending"]))
+    in
     let src_checksum = get_result src_thread src_result in
     let dst_checksum = get_result dst_thread dst_result in
     debug "source suspend_VDI checksum: %s" src_checksum;

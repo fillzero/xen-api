@@ -279,7 +279,7 @@ and create_domain_zero_record ~__context ~domain_zero_ref (host_info: host_info)
     ~generation_id:""
     ~hardware_platform_version:0L
     ~has_vendor_device:false
-    ~requires_reboot:false
+    ~requires_reboot:false ~reference_label:""
   ;
   Db.Host.set_control_domain ~__context ~self:localhost ~value:domain_zero_ref;
   Xapi_vm_helpers.update_memory_overhead ~__context ~vm:domain_zero_ref
@@ -459,7 +459,7 @@ let make_software_version ~__context =
   let v6_version =
     (* Best-effort attempt to read the date-based version from v6d *)
     try
-      match V6client.get_version "make_software_version" with
+      match V6_client.get_version "make_software_version" with
       | "" -> []
       | dbv -> ["dbv", dbv]
     with Api_errors.Server_error (code, []) when code = Api_errors.v6d_failure ->
@@ -643,11 +643,11 @@ let create_chipset_info ~__context =
   let info = ["iommu", iommu] in
   Db.Host.set_chipset_info ~__context ~self:host ~value:info
 
-let create_patches_requiring_reboot_info ~__context ~host =
-  let patch_uuids = try Stdext.Listext.List.setify (Stdext.Unixext.read_lines !Xapi_globs.reboot_required_hfxs) with _ -> [] in
-  let patches = List.fold_left (fun acc uuid ->
+let create_updates_requiring_reboot_info ~__context ~host =
+  let update_uuids = try Stdext.Listext.List.setify (Stdext.Unixext.read_lines !Xapi_globs.reboot_required_hfxs) with _ -> [] in
+  let updates = List.fold_left (fun acc uuid ->
       try
-        (Db.Pool_patch.get_by_uuid ~__context ~uuid) :: acc
-      with _ -> warn "Invalid Pool_patch UUID [%s]" uuid; acc
-    ) [] patch_uuids in
-  Db.Host.set_patches_requiring_reboot ~__context ~self:host ~value:patches
+        (Db.Pool_update.get_by_uuid ~__context ~uuid) :: acc
+      with _ -> warn "Invalid Pool_update UUID [%s]" uuid; acc
+    ) [] update_uuids in
+  Db.Host.set_updates_requiring_reboot ~__context ~self:host ~value:updates
