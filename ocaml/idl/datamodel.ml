@@ -7234,6 +7234,22 @@ let pool_set_vswitch_controller = call
     ~allowed_roles:_R_POOL_OP
     ()
 
+let pool_toggle_ovs_igmp_snooping = call
+    ~in_oss_since:None
+    ~in_product_since:rel_midnight_ride
+    ~lifecycle:[
+      Published, rel_midnight_ride, "Toggle pool level IGMP Snooping in OpenVSwitch.";
+      Extended, rel_cowley, "";
+      Deprecated, rel_falcon, ""]
+    ~name:"toggle_ovs_igmp_snooping"
+    ~params:[
+      Ref _pool, "self", "The pool";
+      Bool, "value", "Enable or Disable IGMP Snooping in pool"
+    ]
+    ~doc:"True to Enable IGMP Snooping in pool"
+    ~allowed_roles:_R_POOL_OP
+    ()
+
 let pool_test_archive_target = call ~flags:[`Session]
     ~name:"test_archive_target"
     ~in_oss_since:None
@@ -7409,6 +7425,7 @@ let pool =
       ; pool_enable_local_storage_caching
       ; pool_disable_local_storage_caching
       ; pool_get_license_state
+      ; pool_toggle_ovs_igmp_snooping
       ; pool_apply_edition
       ; pool_enable_ssl_legacy
       ; pool_disable_ssl_legacy
@@ -7440,6 +7457,7 @@ let pool =
        ; field ~in_product_since:rel_george ~qualifier:DynamicRO ~ty:String ~default_value:(Some (VString "")) "wlb_username" "Username for accessing the workload balancing host"
        ; field ~in_product_since:rel_george ~internal_only:true ~qualifier:DynamicRO ~ty:(Ref _secret) "wlb_password" "Password for accessing the workload balancing host"
        ; field ~in_product_since:rel_george ~qualifier:RW ~ty:Bool ~default_value:(Some (VBool false)) "wlb_enabled" "true if workload balancing is enabled on the pool, false otherwise"
+       ; field ~in_product_since:rel_falcon ~qualifier:RW ~ty:Bool ~default_value:(Some (VBool true)) "ovs_igmp_snooping" "true if ovs igmp snooping is enabled on the pool, false otherwise"
        ; field ~in_product_since:rel_george ~qualifier:RW ~ty:Bool ~default_value:(Some (VBool false)) "wlb_verify_cert" "true if communication with the WLB server should enforce SSL certificate verification."
        ; field ~in_oss_since:None ~in_product_since:rel_midnight_ride ~qualifier:DynamicRO ~ty:Bool ~default_value:(Some (VBool false)) "redo_log_enabled" "true a redo-log is to be used other than when HA is enabled, false otherwise"
        ; field ~in_oss_since:None ~in_product_since:rel_midnight_ride ~qualifier:DynamicRO ~ty:(Ref _vdi) ~default_value:(Some (VRef null_ref)) "redo_log_vdi" "indicates the VDI to use for the redo-log other than when HA is enabled"

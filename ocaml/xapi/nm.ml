@@ -300,6 +300,7 @@ let rec create_bridges ~__context pif_rc net_rc =
     let ports = [pif_rc.API.pIF_device, {default_port with interfaces=[pif_rc.API.pIF_device]}] in
     cleanup,
     [net_rc.API.network_bridge, {default_bridge with ports; bridge_mac=(Some pif_rc.API.pIF_MAC);
+                                                     igmp_snooping=(Some (Db.Pool.get_ovs_igmp_snooping ~__context ~self:(Helpers.get_pool ~__context)));
                                                      other_config; persistent_b=persistent}],
     [pif_rc.API.pIF_device, {default_interface with mtu; ethtool_settings; ethtool_offload; persistent_i=persistent}]
 

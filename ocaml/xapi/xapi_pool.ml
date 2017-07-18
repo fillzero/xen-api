@@ -2037,6 +2037,16 @@ let disable_ssl_legacy = set_ssl_legacy_on_each_host ~value:false
 
 let enable_ssl_legacy = set_ssl_legacy_on_each_host ~value:true
 
+let toggle_ovs_igmp_snooping ~__context ~self ~value =
+  let dbg = Context.string_of_task __context in
+  match Net.Bridge.get_kind dbg () with
+  | Network_interface.Openvswitch ->
+    let current = Net.Bridge.get_all dbg () in
+    List.iter (fun x ->
+        Net.Bridge.set_ovs_igmp_snooping dbg x value
+      ) current
+  | _ -> raise (Api_errors.Server_error(Api_errors.operation_not_allowed, ["host not configured for vswitch operation"]))
+
 let has_extension ~__context ~self ~name =
   let hosts = Db.Host.get_all ~__context in
   List.for_all (fun host ->

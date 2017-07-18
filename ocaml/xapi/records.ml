@@ -20,6 +20,9 @@ open Db_cache (* eek! *)
 open Xstringext
 open Threadext
 
+module D = Debug.Make(struct let name="xapi-record" end)
+open D
+
 let nullref = Ref.string_of (Ref.null)
 let nid = "<not in database>"
 let unknown_time = "<unknown time>"
@@ -505,6 +508,8 @@ let pool_record rpc session_id pool =
       make_field ~name:"wlb-url" ~get:(fun () -> (x ()).API.pool_wlb_url) ();
       make_field ~name:"wlb-username" ~get:(fun () -> (x ()).API.pool_wlb_username) ();
       make_field ~name:"wlb-enabled" ~get:(fun () -> string_of_bool (x ()).API.pool_wlb_enabled) ~set:(fun x -> Client.Pool.set_wlb_enabled rpc session_id pool (bool_of_string x)) ();
+      make_field ~name:"ovs-igmp-snooping" ~get:(fun () -> string_of_bool (x ()).API.pool_ovs_igmp_snooping) ~set:(fun x -> Client.Pool.set_ovs_igmp_snooping rpc session_id pool (bool_of_string x);
+                                                                                                          Client.Pool.toggle_ovs_igmp_snooping rpc session_id pool (bool_of_string x); debug "ddd") ();
       make_field ~name:"wlb-verify-cert" ~get:(fun () -> string_of_bool (x ()).API.pool_wlb_verify_cert) ~set:(fun x -> Client.Pool.set_wlb_verify_cert rpc session_id pool (bool_of_string x)) ();
       make_field ~name:"gui-config"
         ~get:(fun () -> Record_util.s2sm_to_string "; " (x ()).API.pool_gui_config)

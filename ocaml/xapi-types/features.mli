@@ -28,6 +28,7 @@ type feature =
   | Email                        (** Enable email alerting *)
   | Performance                  (** Used by XenCenter to restrict the performance graphs *)
   | WLB                          (** Enable Workload Balancing (WLB) *)
+  (*  | IGMP_Snooping*)                (** Enable IGMP_Snooping *)
   | RBAC                         (** Enable Role-Based Access Control (RBAC) *)
   | DMC                          (** Enable Dynamic Memory Control (DMC) *)
   | Checkpoint                   (** Enable Checkpoint functionality *)
