@@ -159,17 +159,21 @@ let plan_trivially_never_possible config =
   (* If there are exactly config.num_failures hosts and any VMs to protect then no plan is ever possible *)
   || (List.length hosts = config.num_failures && config.vms <> [])
 
-(* Return the state of the world after we generate and follow a failover plan for one host *)
-let simulate_failure config dead_host =
-  let failed_vms = get_failed_vms config [ dead_host ] in
-  let config = { config with hosts = List.filter (fun (h, _) -> h <> dead_host) config.hosts } in
+let simulate_failure' config dead_hosts =
+  let failed_vms = get_failed_vms config  dead_hosts  in
+  let config = { config with hosts = List.filter (fun (h, _) -> not(List.mem h dead_hosts)) config.hosts } in
   let plan = pack_failed_vms_onto_live_hosts config failed_vms in
   (* Plan is full if all VMs were handled *)
   if List.length plan <> (List.length failed_vms) then raise Stop;
   (* Return a new configuration with the host memory and VM placement adjusted *)
   let hosts = account config.hosts config.vms plan in
   let placement = List.map (fun (vm, host) -> vm, (if List.mem_assoc vm plan then assoc "simulate_failure" vm plan else host)) config.placement in
-  { config with hosts = hosts; placement = placement; num_failures = config.num_failures - 1 }
+  { config with hosts = hosts; placement = placement; num_failures = config.num_failures - List.length dead_hosts }
+
+(* Return the state of the world after we generate and follow a failover plan for one host *)
+let simulate_failure config dead_host =
+  simulate_failure' config [ dead_host ]
+
 
 (** For the nCr binpack strategy return true if a plan is always possible *)
 let plan_always_possible config =
@@ -248,17 +252,17 @@ let approximate_bin_pack = {
     (fun config ->
        try
          if plan_trivially_never_possible config then raise Stop;
-         (* Return the state of the world after we generate and follow a failover plan for the biggest host that
+         (* Return the state of the world after we generate and follow a failover plan for the biggest hosts that
             	    could fail. Raises 'Stop' if a plan could not be found. *)
-         let simulate_worst_single_failure config =
+         let simulate_worst_multiple_failure config =
            (* Assume the biggest host fails *)
-           let biggest_host = fst (List.hd (List.sort less_than config.hosts)) in
-           approximate_config (simulate_failure config biggest_host) in
+           let rec biggest_n_hosts n hosts = match hosts with
+             | [] -> failwith "biggest_n_hosts"
+             | h::hosts -> if n=1 then [fst h] else fst h::biggest_n_hosts (n-1) hosts in
+           approximate_config (simulate_failure' config (biggest_n_hosts config.num_failures config.hosts)) in
 
-         let initial_config = approximate_config config in
-
-         (* Simulate the n worst failures *)
-         ignore (List.fold_left (fun config _ -> simulate_worst_single_failure config) initial_config (mkints initial_config.num_failures));
+         (* Simulate the n hosts worst failure *)
+         ignore(simulate_worst_multiple_failure (approximate_config config));
          true
        with Stop -> false
     );
