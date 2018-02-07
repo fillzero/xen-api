@@ -1521,13 +1521,13 @@ let ha_failover_plan_exists ~__context ~n =
   let n = Int64.to_int n in
   let all_protected_vms = Xapi_ha_vm_failover.all_protected_vms ~__context in
   match Xapi_ha_vm_failover.plan_for_n_failures ~__context ~all_protected_vms n with
-  | Xapi_ha_vm_failover.Plan_exists_for_all_VMs ->
+  | _, _, Xapi_ha_vm_failover.Plan_exists_for_all_VMs ->
     info "HA failover plan exists for all protected VMs for up to %d host failures" n;
     true
-  | Xapi_ha_vm_failover.Plan_exists_excluding_non_agile_VMs ->
+  | _, _, Xapi_ha_vm_failover.Plan_exists_excluding_non_agile_VMs ->
     info "HA failover plan exists for all protected VMs, excluding some non-agile VMs, for up to %d host failures" n;
     false (* might define this as true later *)
-  | Xapi_ha_vm_failover.No_plan_exists ->
+  | _, _, Xapi_ha_vm_failover.No_plan_exists ->
     info "No HA failover plan exists for %d host failures" n;
     false
 
