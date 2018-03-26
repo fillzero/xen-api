@@ -1442,19 +1442,23 @@ let enable __context heartbeat_srs configuration =
       (fun rpc session_id ->
          (* ... *)
          (* Tell each host to attach its statefile, write config files etc. Do not start the xHA daemon. *)
-         List.iter
-           (fun host ->
-              try
-                debug "Preconfiguring HA on host '%s' ('%s')" (Db.Host.get_name_label ~__context ~self:host) (Ref.string_of host);
-                Client.Host.preconfigure_ha rpc session_id host !statefile_vdis database_vdi generation;
-                count_call ()
-              with e ->
-                error "Caught exception while calling Host.preconfigure_ha: '%s' ('%s') %s" (Db.Host.get_name_label ~__context ~self:host) (Ref.string_of host) (ExnHelper.string_of_exn e);
-                (* Perform a disable since the pool HA state isn't consistent *)
-                error "Attempting to disable HA pool-wide";
-                Helpers.log_exn_continue "Disabling HA after a failure during the configuration stage" disable_internal __context;
-                raise e
-           ) hosts;
+         let () = (
+           let tasks =
+             hosts
+             |> List.map (fun host ->
+                  debug "Preconfiguring HA on host '%s' ('%s')" (Db.Host.get_name_label ~__context ~self:host) (Ref.string_of host);
+                  Client.Async.Host.preconfigure_ha rpc session_id host !statefile_vdis database_vdi generation) in
+
+           try
+             Tasks.wait_for_all ~rpc ~session_id ~tasks
+           with e ->
+             Tasks.wait_for_all ~rpc ~session_id ~tasks;
+             error "Caught execption while calling Host.preconfigure_ha";
+             (* Perform a disable since the pool HA state isn't consistent *)
+             error "Attempting to disable HA pool-wide";
+             Helpers.log_exn_continue "Disabling HA after a failure during the configuration stage" disable_internal __context;
+             raise e
+           ) in ();
 
          let errors = thread_iter_all_exns
              (fun host ->
