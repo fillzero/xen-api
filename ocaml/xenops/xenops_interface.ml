@@ -48,6 +48,7 @@ exception Hook_failed of (string * string * string * string)
 exception Not_enough_memory of int64
 exception Cancelled of string
 exception Storage_backend_error of (string * (string list))
+exception Ballooning_timeout_before_migration
 
 type debug_info = string
 

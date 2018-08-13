@@ -94,8 +94,11 @@ let pool_migrate ~__context ~vm ~host ~options =
 		if Xenops_interface.(state.Vm.power_state = Suspended) then begin
 			debug "xenops: %s: shutting down suspended VM" vm';
 			Xapi_xenops.shutdown ~__context ~self:vm None;
-		end;
-		raise e
+		  end;
+        match e with
+        | Xenops_interface.Ballooning_timeout_before_migration ->
+           raise Api_errors.(Server_error (ballooning_timeout_before_migration, [Ref.string_of vm]))
+        | _ -> raise e
 	end;
 	Rrdd_proxy.migrate_rrd ~__context ~vm_uuid:vm' ~host_uuid:(Ref.string_of host) ();
 	(* We will have missed important events because we set resident_on late.

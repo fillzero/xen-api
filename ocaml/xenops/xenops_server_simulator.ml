@@ -353,6 +353,8 @@ module VM = struct
 	let set_internal_state vm s =
 		DB.write vm.Vm.id (s |> Jsonrpc.of_string |> Domain.t_of_rpc)
 
+	let wait_ballooning _ _ = ()
+
 	let minimum_reboot_delay = 0.
 end
 

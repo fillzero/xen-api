@@ -1759,7 +1759,8 @@ let transform_xenops_exn ~__context ~vm f =
 					Ref.null in
 			reraise Api_errors.task_cancelled [ Ref.string_of task ]
 		| Storage_backend_error(code, params) -> reraise code params
-
+		| Ballooning_timeout_before_migration ->
+			reraise Api_errors.ballooning_timeout_before_migration [Ref.string_of vm]
 
 let refresh_vm ~__context ~self =
 	let id = id_of_vm ~__context ~self in

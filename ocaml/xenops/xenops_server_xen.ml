@@ -23,6 +23,7 @@ open Threadext
 open Stringext
 open Fun
 open Xenops_task
+open Cancel_utils
 
 module D = Debug.Debugger(struct let name = service_name end)
 open D
@@ -37,6 +38,8 @@ let _mkfs = "/sbin/mkfs"
 let _mount = "/bin/mount"
 let _umount = "/bin/umount"
 let _ionice = "/usr/bin/ionice"
+
+let additional_ballooning_timeout = ref 120.
 
 let run cmd args =
 	debug "%s %s" cmd (String.concat " " args);
@@ -1268,6 +1271,35 @@ module VM = struct
 				)
 		| FD fd -> f fd
 
+	let wait_ballooning task vm =
+		on_domain
+			(fun xc xs _ _ di ->
+				let domid = di.domid in
+				let balloon_active_path = xs.Xs.getdomainpath domid ^ "/control/balloon-active" in
+				let balloon_active =
+					try
+						Some (xs.Xs.read balloon_active_path)
+					with _ -> None
+				in
+				match balloon_active with
+				(* Not currently ballooning *)
+				| None | Some "0" -> ()
+				(* Ballooning in progress, we need to wait *)
+				| Some _ -> 
+					let watches = [ Watch.value_to_become balloon_active_path "0"
+					              ; Watch.key_to_disappear balloon_active_path ]
+					in
+					(* raise Cancelled on task cancellation and Watch.Timeout on timeout *)
+					try
+						cancellable_watch (Domain domid) watches [] task ~xs ~timeout:!additional_ballooning_timeout ()
+						|> ignore
+					with Watch.Timeout _ ->
+						let msg = Printf.sprintf 
+							"Ballooning Timeout: unable to balloon down the memory of vm %s, please increase the value of memory-dynamic-min"
+							vm.Vm.id
+						in raise (Internal_error msg)
+			) Oldest task vm
+
 	let save task progress_callback vm flags data =
 		let flags' =
 			List.map
@@ -1285,6 +1317,8 @@ module VM = struct
 					(fun fd ->
 						Domain.suspend task ~xc ~xs ~hvm ~progress_callback ~qemu_domid (choose_xenguest vm.Vm.platformdata) domid fd flags'
 							(fun () ->
+								(* SCTX-2558: wait more for ballooning if needed *)
+								wait_ballooning task vm;
 								if not(request_shutdown task vm Suspend 30.)
 								then raise (Failed_to_acknowledge_shutdown_request);
 								if not(wait_shutdown task vm Suspend 1200.)
